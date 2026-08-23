@@ -11,6 +11,10 @@ permissions:
 jobs:
   gate-check:
     runs-on: ubuntu-latest
+    env:
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_PASS: ${{ secrets.MAIL_PASS }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,14 +57,14 @@ jobs:
           EOF
 
       - name: send email
-        if: always()
+        if: always() && env.MAIL_TO != ''
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.qq.com
           server_port: 465
-          username: ${{ secrets.MAIL_USER }}
-          password: ${{ secrets.MAIL_PASS }}
-          to: ${{ secrets.MAIL_TO }}
+          username: ${{ env.MAIL_USER }}
+          password: ${{ env.MAIL_PASS }}
+          to: ${{ env.MAIL_TO }}
           from: 因子云端
           subject: 闸门周检 ${{ job.status == 'success' && '✅' || '❌' }}${{ steps.sum.outputs.review == 'YES' && ' ⚠️需人工复核参数' || '' }}（当前参数本周 ${{ steps.sum.outputs.cur }} vs 基线 ${{ steps.sum.outputs.base }}）
           body: |

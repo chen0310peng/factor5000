@@ -11,6 +11,10 @@ permissions:
 jobs:
   backtest:
     runs-on: ubuntu-latest
+    env:
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_PASS: ${{ secrets.MAIL_PASS }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
     steps:
       - uses: actions/checkout@v4
 
@@ -26,9 +30,33 @@ jobs:
         timeout-minutes: 55
 
       - name: push result
+        id: push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/factor5000/selected_top500.json
           git diff --cached --quiet || git commit -m "daily factor selection"
           git push
+
+      - name: read summary
+        id: sum
+        run: |
+          GEN=$(python -c "import json;print(json.load(open('data/factor5000/selected_top500.json',encoding='utf-8')).get('generated_at','未知'))" 2>/dev/null || echo "无结果文件")
+          echo "gen=$GEN" >> "$GITHUB_OUTPUT"
+
+      - name: send email
+        if: always() && env.MAIL_TO != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          username: ${{ env.MAIL_USER }}
+          password: ${{ env.MAIL_PASS }}
+          to: ${{ env.MAIL_TO }}
+          from: 因子云端
+          subject: 因子回测 ${{ job.status == 'success' && '成功 ✅' || '失败 ❌' }}（结果时间 ${{ steps.sum.outputs.gen }}）
+          body: |
+            每日因子回测已完成。
+            状态：${{ job.status }}
+            因子池生成时间：${{ steps.sum.outputs.gen }}
+            详情：https://github.com/chen0310peng/factor5000/actions
