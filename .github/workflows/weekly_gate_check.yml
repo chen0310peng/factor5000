@@ -1,0 +1,72 @@
+name: weekly gate robustness check
+
+on:
+  schedule:
+    - cron: '41 0 * * 1'   # 每周一 UTC 00:41（北京 08:41）
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  gate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install deps
+        run: pip install pandas numpy requests
+
+      - name: run gate robustness check
+        run: python gate_weekly_check.py
+        timeout-minutes: 40
+
+      - name: push result
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/factor5000/gate_check.json
+          git diff --cached --quiet || git commit -m "weekly gate robustness check"
+          git push
+
+      - name: read summary
+        id: sum
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, os
+          try:
+              d = json.load(open('data/factor5000/gate_check.json', encoding='utf-8'))
+              print(f"cur={d['current_params_60d']:+.2f}% vs base={d['baseline_60d']:+.2f}%")
+              print(f"review={'YES' if d['review_needed'] else 'no'}")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"cur={d['current_params_60d']:+.2f}%\n")
+                  f.write(f"base={d['baseline_60d']:+.2f}%\n")
+                  f.write(f"review={'YES' if d['review_needed'] else 'no'}\n")
+          except Exception as e:
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write("cur=无\nbase=无\nreview=unknown\n")
+          EOF
+
+      - name: send email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USER }}
+          password: ${{ secrets.MAIL_PASS }}
+          to: ${{ secrets.MAIL_TO }}
+          from: 因子云端
+          subject: 闸门周检 ${{ job.status == 'success' && '✅' || '❌' }}${{ steps.sum.outputs.review == 'YES' && ' ⚠️需人工复核参数' || '' }}（当前参数本周 ${{ steps.sum.outputs.cur }} vs 基线 ${{ steps.sum.outputs.base }}）
+          body: |
+            行情准入闸门每周稳健性复核（只监控，不自动改参数）。
+            状态：${{ job.status }}
+            当前参数(7日/0.9)近60天模拟：${{ steps.sum.outputs.cur }}（无闸门基线 ${{ steps.sum.outputs.base }}）
+            需人工复核：${{ steps.sum.outputs.review }}
+            说明：连续3周未改善基线才会标记复核。历史详情见仓库 data/factor5000/gate_check.json
+            详情：https://github.com/chen0310peng/factor5000/actions
