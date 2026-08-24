@@ -36,7 +36,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/factor5000/selected_top500.json
           git diff --cached --quiet || git commit -m "daily factor selection"
-          git push
+          git pull --rebase origin main
+          git push || (git pull --rebase origin main && git push)
 
       - name: read summary
         id: sum
