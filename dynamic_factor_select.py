@@ -421,10 +421,15 @@ def main():
         """分类有效性判定：方向类以样本外模拟夏普为主，防御类以命中率/提升倍数为主"""
         if r["cat"] in ("波段","日内","超短线"):
             s = r["sharpe"]
+            # 2026-08-29 近期方向一致性闸：近窗IC与认定方向明显背离(≤-0.002)直接淘汰；
+            # 无同向证据(<0.002)最高只给低信度（教训：8-28 日内池91%、超短线池84%因子上岗后近期反向生效，实盘连续止损）
+            consV = (r["icR"] or 0) * r["dir"]
+            if consV <= -0.002: return None
+            cap = "low" if consV < 0.002 else None
             if s is None: return "low" if abs(r["icR"]) >= 0.004 else None
             if s > 0.3 and (r["win"] is None or r["win"] >= 0.5) and r["agree"] >= 1.0:
-                return "high"
-            if s > 0: return "mid"
+                return cap or "high"
+            if s > 0: return cap or "mid"
             if s > -2: return "low"
             return None
         cons = r["icR"] * r["dir"] > 0          # 近期仍同向
@@ -504,7 +509,7 @@ def main():
                                       FROM factors f LEFT JOIN runnable r ON f.id=r.id""")]
     out = {"generated_at": time.strftime("%Y-%m-%d %H:%M"), "selected": selected,
            "counts": {k: len(v) for k, v in selected.items()},
-           "method": "波段/日内/超短线=模拟交易夏普+IC；超跌超涨=极值反转命中率；消息面=事件研究提升倍数；币安+OKX双源验证",
+           "method": "波段/日内/超短线=模拟交易夏普+IC+近期方向一致性闸；超跌超涨=极值反转命中率；消息面=事件研究提升倍数；币安+OKX双源验证",
            "library_total": len(library), "library": library}
     with open("data/factor5000/selected_top500.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False)
