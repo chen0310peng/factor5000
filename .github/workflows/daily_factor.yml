@@ -34,7 +34,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/factor5000/selected_top500.json
+          git add data/factor5000/selected_top500.json data/factor5000/daily_summary.txt
           git diff --cached --quiet || git commit -m "daily factor selection"
           git pull --rebase origin main
           git push || (git pull --rebase origin main && git push)
@@ -44,6 +44,9 @@ jobs:
         run: |
           GEN=$(python -c "import json;print(json.load(open('data/factor5000/selected_top500.json',encoding='utf-8')).get('generated_at','未知'))" 2>/dev/null || echo "无结果文件")
           echo "gen=$GEN" >> "$GITHUB_OUTPUT"
+          echo "gates<<GATEOF" >> "$GITHUB_OUTPUT"
+          cat data/factor5000/daily_summary.txt >> "$GITHUB_OUTPUT" 2>/dev/null || echo "（闸门状态摘要未生成）" >> "$GITHUB_OUTPUT"
+          echo "GATEOF" >> "$GITHUB_OUTPUT"
 
       - name: send email
         if: always() && env.MAIL_TO != ''
@@ -60,4 +63,5 @@ jobs:
             每日因子回测已完成。
             状态：${{ job.status }}
             因子池生成时间：${{ steps.sum.outputs.gen }}
+            ${{ steps.sum.outputs.gates }}
             详情：https://github.com/chen0310peng/factor5000/actions
