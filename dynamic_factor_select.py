@@ -214,7 +214,7 @@ def build_env(df, fund_s=None, oi_s=None, ratio_s=None):
     vv = pd.Series(v).groupby(day).cumsum().values
     with np.errstate(divide="ignore", invalid="ignore"): vwap = pv/vv
     tod = ((t//60000)%1440).astype(float)
-    return dict(c=c,o=o,h=h,l=l,v=v,tb=tb,fund=fund,oi_=oiv,ratio=ratio,
+    return dict(c=c,o=o,h=h,l=l,v=v,tb=tb,t=t,fund=fund,oi_=oiv,ratio=ratio,
                 ret=ret,vwap=vwap,tod=tod,day=day,ABS=np.abs)
 
 def spearman(a, b):
@@ -514,6 +514,96 @@ def main():
     with open("data/factor5000/selected_top500.json", "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False)
     print("已输出 data/factor5000/selected_top500.json", flush=True)
+
+    # ===== 三模式闸门状态摘要（与网页版同规则的近似实现，写入 daily_summary.txt 供邮件展示） =====
+    def rolling_z_arr(a, w=200):
+        s = pd.Series(np.asarray(a, dtype="float64"))
+        return ((s - s.rolling(w).mean()) / (s.rolling(w).std() + 1e-12)).values
+
+    def composite(cat, grid_tf):
+        """今日上岗池的合成信号序列（币安双币，滚动z(200)+dir×w 加权，对齐到 grid_tf 网格）"""
+        res = {}
+        for sym in ["BTCUSDT", "ETHUSDT"]:
+            genv = get_env("bn", sym, grid_tf)
+            if genv is None: continue
+            acc = np.zeros(len(genv["t"])); wacc = np.zeros(len(genv["t"]))
+            for f in selected.get(cat, []):
+                env = get_env("bn", sym, f["tf"])
+                if env is None or len(env["c"]) < 60: continue
+                try:
+                    fac = eval_factor(compile_formula(f["formula"], f["per_day"]), env)
+                except Exception:
+                    continue
+                if fac is None or len(fac) != len(env["t"]): continue
+                al = asof_series(genv["t"], pd.Series(env["t"]), pd.Series(rolling_z_arr(fac, 200)))
+                ok = np.isfinite(al)
+                acc[ok] += f["dir"] * al[ok] * f["w"]; wacc[ok] += f["w"]
+            res[sym] = (genv["t"], genv["c"], np.clip(np.where(wacc > 0, acc / wacc, np.nan), -3, 3))
+        return res
+
+    def gate_sim(comp, th, hold_ms):
+        """7日简化模拟：|S|≥th 开仓，反向≥th 或超时平仓，万4费 → (blocked, pnl, trades)"""
+        out = {}
+        for sym, (t, c, S) in comp.items():
+            n = len(t)
+            if n < 100: out[sym] = None; continue
+            spacing = (t[1] - t[0]) or 900000
+            b7 = min(n - 2, int(round(7 * 86400000 / spacing)))
+            bh = max(1, int(round(hold_ms / spacing)))
+            pos = 0; entry = 0.0; held = 0; pnl = 0.0; trades = 0
+            for i in range(n - b7, n - 1):
+                Si = S[i]
+                if not np.isfinite(Si): continue
+                if pos == 0:
+                    if abs(Si) >= th: pos = np.sign(Si); entry = c[i]; held = 0; pnl -= 0.0004; trades += 1
+                else:
+                    held += 1
+                    if (np.sign(Si) == -pos and abs(Si) >= th) or held >= bh:
+                        pnl += pos * (c[i] / entry - 1) - 0.0004; pos = 0
+            if pos != 0: pnl += pos * (c[-1] / entry - 1) - 0.0004
+            out[sym] = (bool(pnl < 0 and trades >= 5), float(pnl), trades)
+        return out
+
+    def kelly_sw(comp):
+        """波段：近30日合成序列日频模拟 → 半凯利上限 + 当前方向"""
+        out = {}
+        for sym, (t, c, S) in comp.items():
+            n = len(c)
+            if n < 40: out[sym] = None; continue
+            rs = []; prev = 0.0
+            for i in range(max(2, n - 32), n):
+                Si = S[i - 1]
+                if not np.isfinite(Si): prev = 0.0; continue
+                b = float(np.clip(Si, -1, 1))
+                rs.append(b * (c[i] / c[i - 1] - 1) - 0.0004 * abs(b - prev)); prev = b
+            if len(rs) < 15: out[sym] = None; continue
+            wins = [x for x in rs if x > 0]; losses = [x for x in rs if x < 0]
+            p = len(wins) / len(rs)
+            br = (np.mean(wins) / abs(np.mean(losses))) if wins and losses else 1.0
+            half = min(max(p - (1 - p) / (br or 1e-9), 0), 1) / 2
+            cur = S[-1]
+            out[sym] = (float(min(half, 0.5) * 100), "多" if cur > 0.25 else ("空" if cur < -0.25 else "中性"))
+        return out
+
+    try:
+        g_id = gate_sim(composite("日内", "15m"), 0.9, 24 * 3600000)
+        g_sc = gate_sim(composite("超短线", "5m"), 1.2, 3600000)
+        k_sw = kelly_sw(composite("波段", "1d"))
+        def gs(g):
+            if g is None: return "数据不足"
+            return ("⛔拦截" if g[0] else "✅放行") + f"（7日{g[1]*100:+.2f}%/{g[2]}单）"
+        lines = ["", "【三模式闸门状态（动态池近7日模拟，近似值）】"]
+        for sym, cn in [("BTCUSDT", "BTC"), ("ETHUSDT", "ETH")]:
+            sw = k_sw.get(sym)
+            lines.append(f"{cn}：⚡日内 {gs(g_id.get(sym))} ｜ 🔥超短线 {gs(g_sc.get(sym))} ｜ 🌊波段 凯利上限{sw[0]:.1f}%·信号{sw[1]}" if sw else f"{cn}：⚡日内 {gs(g_id.get(sym))} ｜ 🔥超短线 {gs(g_sc.get(sym))} ｜ 🌊波段 数据不足")
+        lines.append("⛔=该池近7日模拟亏损，网页端已自动暂停该模式开新仓；回暖自动放行。")
+        lines.append("【今日上岗】" + " ".join(f"{k}{len(v)}" for k, v in selected.items()))
+        summary = "\n".join(lines)
+        with open("data/factor5000/daily_summary.txt", "w", encoding="utf-8") as f:
+            f.write(summary)
+        print(summary, flush=True)
+    except Exception as e:
+        print("闸门状态摘要生成失败（不影响选拔结果）:", e, flush=True)
 
 if __name__ == "__main__":
     main()
