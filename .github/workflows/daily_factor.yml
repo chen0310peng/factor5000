@@ -44,9 +44,7 @@ jobs:
         run: |
           GEN=$(python -c "import json;print(json.load(open('data/factor5000/selected_top500.json',encoding='utf-8')).get('generated_at','未知'))" 2>/dev/null || echo "无结果文件")
           echo "gen=$GEN" >> "$GITHUB_OUTPUT"
-          echo "gates<<GATEOF" >> "$GITHUB_OUTPUT"
-          cat data/factor5000/daily_summary.txt >> "$GITHUB_OUTPUT" 2>/dev/null || echo "（闸门状态摘要未生成）" >> "$GITHUB_OUTPUT"
-          echo "GATEOF" >> "$GITHUB_OUTPUT"
+          { echo "gates<<GATEOF"; cat data/factor5000/daily_summary.txt 2>/dev/null || echo "（闸门状态摘要未生成）"; echo; echo "GATEOF"; } >> "$GITHUB_OUTPUT"
 
       - name: send email
         if: always() && env.MAIL_TO != ''
