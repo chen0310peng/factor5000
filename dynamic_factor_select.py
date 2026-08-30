@@ -490,18 +490,46 @@ def main():
     pd.DataFrame([{k: v for k, v in r.items() if k != "src"} for r in results]).to_csv(
         "data/factor5000/ic_all.csv", index=False, encoding="utf-8-sig")
 
+    # ===== 去同质化选拔（2026-08-31 新增） =====
+    # 背景：波段池曾 90/100 全是"ROC动量_Xbar_平滑Y"参数变体——本质是同一信号复制90份，
+    # 暴跌后集体指向空导致 8-29 两单追在全天最低点。规则：同一因子族（名称去掉数字参数后缀）
+    # 每类最多上岗 30 个（30%），强制不同信号逻辑混编；先按权重贪心选，不足100再用被跳过的补足。
+    import re as _re
+    def fam_of(name):
+        toks = str(name).split("_")
+        keep = []
+        for t in toks:
+            if _re.search(r"\d", t):
+                break
+            keep.append(t)
+        return "_".join(keep) or str(name)
+
+    FAM_CAP = 30
     selected = {}
     for cat in ["波段", "日内", "超跌超涨防护", "消息面防护", "超短线"]:
         pool = [r for r in results if r["cat"] == cat]
         pool.sort(key=lambda r: -r["w"])
-        picked = pool[:100]          # 每天该类别权重 Top100 上岗（5000全库存库备用）
+        picked, skipped, famcnt = [], [], {}
+        for r in pool:
+            f = fam_of(r["name"])
+            if famcnt.get(f, 0) < FAM_CAP:
+                picked.append(r); famcnt[f] = famcnt.get(f, 0) + 1
+            else:
+                skipped.append(r)
+            if len(picked) >= 100:
+                break
+        if len(picked) < 100:                       # 池子不够多样化时，用被跳过的按权重补足，宁可同质也不缺编
+            need = 100 - len(picked)
+            picked.extend(skipped[:need])
         if len(picked) < 100:
             print(f"  ⚠️ {cat}: 有效因子仅 {len(picked)} 个，不足100，全部上岗", flush=True)
         selected[cat] = picked
         if pool:
             s_ = [r["sharpe"] for r in picked if r["sharpe"] is not None]
             extra = f"样本外夏普均值 {np.mean(s_):.2f}" if s_ else ""
-            print(f"  {cat}: 池{len(pool)} → 今日上岗{len(picked)} {extra}（榜首 {picked[0]['id']} {picked[0]['name']} sharpe={picked[0]['sharpe']}）", flush=True)
+            top_fam = sorted(famcnt.items(), key=lambda x: -x[1])[:3]
+            fam_txt = "｜族分布 " + "/".join(f"{f}×{c}" for f, c in top_fam)
+            print(f"  {cat}: 池{len(pool)} → 今日上岗{len(picked)}（{len(famcnt)}个因子族{fam_txt}）{extra}（榜首 {picked[0]['id']} {picked[0]['name']} sharpe={picked[0]['sharpe']}）", flush=True)
     library = [{"id": r[0], "cat": r[1], "name": r[2], "formula": r[3], "tf": r[4],
                 "runnable": 1 if r[5] else 0}
                for r in db.execute("""SELECT f.id, f.cat, f.name, f.formula, f.tf,
