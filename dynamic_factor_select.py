@@ -18,6 +18,9 @@ import dsl
 from dsl import compile_formula
 
 BNA = "https://fapi.binance.com"
+# 币安期货镜像域名列表（2026-09-01 新增）：主站路由不稳定时按顺序自动切换，与网页端5镜像竞速同策略
+BN_HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com", "https://fapi2.binance.com",
+            "https://fapi3.binance.com", "https://fapi4.binance.com"]
 OKX = "https://www.okx.com"
 S = requests.Session(); S.headers.update({"User-Agent": "Mozilla/5.0"})
 CACHE = "data/factor5000/cache"
@@ -33,12 +36,23 @@ def get(base, path, params, retries=3):
             time.sleep(2 * (i + 1))
     raise RuntimeError(f"GET {path} failed")
 
+def bn_get(path, params):
+    """币安期货多镜像容灾：主站→fapi1~fapi4 顺序尝试，任一可用即用"""
+    last = None
+    for h in BN_HOSTS:
+        try:
+            return get(h, path, params, retries=2)
+        except Exception as e:
+            last = e
+            print(f"  ⚠️ 币安镜像 {h} 不可用，切换下一个", flush=True)
+    raise RuntimeError(f"币安5镜像全部不可用: {path} ({last})")
+
 def bn_klines(symbol, interval, days):
     end = int(time.time() * 1000); start = end - days * 86400000
     rows, cur = [], start
     while cur < end:
-        data = get(BNA, "/fapi/v1/klines", {"symbol": symbol, "interval": interval,
-                                            "startTime": cur, "limit": 1500})
+        data = bn_get("/fapi/v1/klines", {"symbol": symbol, "interval": interval,
+                                          "startTime": cur, "limit": 1500})
         if not data: break
         rows.extend(data); cur = data[-1][0] + 1
         if len(data) < 1500: break
@@ -160,10 +174,10 @@ def load_data():
     fund, oi = {}, {}
     for sym in ["BTCUSDT", "ETHUSDT"]:
         try:
-            f = get(BNA, "/fapi/v1/fundingRate", {"symbol": sym, "limit": 1000})
+            f = bn_get("/fapi/v1/fundingRate", {"symbol": sym, "limit": 1000})
             fund[sym] = pd.DataFrame({"t": [x["fundingTime"] for x in f],
                                       "r": [float(x["fundingRate"]) for x in f]})
-            o = get(BNA, "/futures/data/openInterestHist", {"symbol": sym, "period": "1h", "limit": 500})
+            o = bn_get("/futures/data/openInterestHist", {"symbol": sym, "period": "1h", "limit": 500})
             oi[sym] = pd.DataFrame({"t": [x["timestamp"] for x in o],
                                     "v": [float(x["sumOpenInterest"]) for x in o]})
         except Exception as e:
