@@ -1,0 +1,61 @@
+name: live engine (15min)
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: live_engine
+  cancel-in-progress: false
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    env:
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_PASS: ${{ secrets.MAIL_PASS }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: install deps
+        run: pip install pandas numpy requests
+
+      - name: run live engine
+        run: python live_engine.py
+        timeout-minutes: 12
+
+      - name: push state
+        id: push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/live_state.json
+          git diff --cached --quiet || git commit -m "live state $(date -u +'%m-%d %H:%M')"
+          git pull --rebase origin main
+          git push || (git pull --rebase origin main && git push)
+
+      - name: send trade email
+        if: always() && env.MAIL_TO != '' && hashFiles('data/live_events_pending.txt') != ''
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.qq.com
+          server_port: 465
+          username: ${{ env.MAIL_USER }}
+          password: ${{ env.MAIL_PASS }}
+          to: ${{ env.MAIL_TO }}
+          from: 云端引擎
+          subject: 🔔 云端引擎交易信号（${{ job.status }}）
+          body: file://data/live_events_pending.txt
+
+      - name: clear pending events
+        if: always()
+        run: rm -f data/live_events_pending.txt
