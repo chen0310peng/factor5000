@@ -1,0 +1,52 @@
+{
+ "positions": {},
+ "positions_intra": {
+  "BTC": null,
+  "ETH": null
+ },
+ "trades": [],
+ "events": [
+  "[2026-09-16 00:16:08] 🕐 BTC 日内空信号已走出 1.0×ATR4h → 不追单，反弹至 $76,327.9 上方自动开第一手",
+  "[2026-09-16 00:16:08] 🕐 ETH 日内空信号已走出 1.7×ATR4h → 不追单，反弹至 $2,445.0 上方自动开第一手"
+ ],
+ "arm": {
+  "ID:BTC_z": "SHORT",
+  "ID:ETH_z": "SHORT"
+ },
+ "defense": {
+  "BTC": {
+   "shockTs": 0,
+   "shockDir": 0,
+   "shockAmp": 0,
+   "shockPrice": 0,
+   "rvHist": [
+    {
+     "t": 1789488967574,
+     "v": 0.5895039539899353
+    }
+   ]
+  },
+  "ETH": {
+   "shockTs": 0,
+   "shockDir": 0,
+   "shockAmp": 0,
+   "shockPrice": 0,
+   "rvHist": [
+    {
+     "t": 1789488967602,
+     "v": 0.7534148094895758
+    }
+   ]
+  }
+ },
+ "sema": {
+  "BTC": -2.612982857697426,
+  "ETH": -2.6024074993619832
+ },
+ "freeze": {},
+ "intra_flip_cd": {},
+ "intra_opp": {},
+ "intra_pause_until": 0,
+ "signals": {},
+ "updated_at": "2026-09-16 00:16:08"
+}
