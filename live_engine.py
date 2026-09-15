@@ -384,12 +384,13 @@ def compute_signal(d):
     c, v = d["close"], d["vol"]; n = len(c)
     ret = [None] + [c[i]/c[i-1]-1 for i in range(1, n)]
     v20 = roll_mean(v, 20)
-    vshock = [ (v[i]/v20[i]) if v20[i] else None for i in range(n) ]
+    vshock = [ (v[i]/v20[i]) if (v20[i] is not None and np.isfinite(v20[i]) and v20[i] != 0) else None for i in range(n) ]
     fund_daily = {}
     for x in d["fund"]:
         day = time.strftime("%Y-%m-%d", time.gmtime(x["t"]/1000))
         fund_daily.setdefault(day, []).append(x["r"])
-    fund30 = [m for m in roll_mean([mean(a) for a in fund_daily.values()], 30) if m is not None]
+    fund30 = [m for m in roll_mean([mean(a) for a in fund_daily.values()], 30)
+              if m is not None and np.isfinite(m)]   # JS rollMean 头部为 null 会被过滤；pandas 头部是 NaN，必须按 finite 过滤
     zV = -z_last([x for x in vshock if x is not None])
     zF = -z_last(fund30) if fund30 else 0.0
     S = clamp((zV+zF)/2, -3, 3)
@@ -418,15 +419,17 @@ def compute_signal(d):
             win = s[i-w:i]
             out.append((s[i]-mean(win))/((std(win)) or 1e-12))
         return out
-    vsz = z_series([x for x in vshock if x is not None])
+    vsz = z_series([x for x in vshock if x is not None and np.isfinite(x)])
     f30z = z_series(fund30) if fund30 else []
     off = n - len(vsz)
     sim = []; prev_pos = 0
     for i in range(max(60, off+60), n-1):
         j = i - off
         if j >= len(vsz) or not len(f30z): break
-        V, F = -vsz[j], -f30z[min(j, len(f30z)-1)]
-        if V is None or F is None: continue
+        # JS 语义：null 经一元负号强制为 -0 → 这里 None/NaN 一律按 0.0 处理（与网页一致且不炸）
+        vj = vsz[j]; fj = f30z[min(j, len(f30z)-1)]
+        V = -(vj if (vj is not None and np.isfinite(vj)) else 0.0)
+        F = -(fj if (fj is not None and np.isfinite(fj)) else 0.0)
         s_ = clamp((V+F)/2, -3, 3)
         b = 1 if s_ >= 1 else 0.5 if s_ >= 0.5 else 0 if s_ > -0.5 else -0.5 if s_ > -1 else -1
         if b > 0 and c[i] <= mean(c[max(0, i-200):i]): b *= 0.3
