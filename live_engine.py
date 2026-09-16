@@ -846,7 +846,9 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
         flip_cd = state.setdefault("intra_flip_cd", {}).get(sym, 0)
         if now_ms() < pause_until or now_ms() < flip_cd or gate["blocked"] or intra_gate["blocked"]:
             return None
-        if zone != "FLAT" and hour_utc < 20:
+        # 2026-09-16 修复：开仓窗口排除 UTC 0 点小时（该小时同时是"日界强平"窗口，
+        # 云端24h运行后暴露——08:45北京开的单08:56就被日界强平，来回空转+邮件轰炸）
+        if zone != "FLAT" and 0 < hour_utc < 20:
             d = 1 if zone == "LONG" else -1
             cg = chase_check(state, "ID", sym, d, P, A, isig["hi"], isig["lo"])
             if not cg["pass"]:
@@ -1045,12 +1047,13 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
         if not any(e in r for r in recent):
             state.setdefault("events", []).append(line)
     save_state(state_path, state)
-    n_trade = sum(1 for e in events if e.startswith(("🆕", "⚡", "🛑", "💰", "🔄", "🏁", "🛡", "⏰", "🩹")))
-    print(f"完成：{len(events)} 条事件（{n_trade} 条交易类），状态已写入 {state_path}", flush=True)
-    # 交易类事件写入标记文件，供 workflow 决定是否发邮件
-    if n_trade:
+    TRADE_ICONS = ("🆕", "⚡", "🛑", "💰", "🔄", "🏁", "🛡", "⏰", "🩹")
+    trade_evs = [e for e in events if e.startswith(TRADE_ICONS)]
+    print(f"完成：{len(events)} 条事件（{len(trade_evs)} 条交易类），状态已写入 {state_path}", flush=True)
+    # 交易类事件写入标记文件，供 workflow 决定是否发邮件（只含开平仓等交易事件，不含追单提示等噪音）
+    if trade_evs:
         with open("data/live_events_pending.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(e for e in events))
+            f.write("\n".join(trade_evs))
     return 0
 
 if __name__ == "__main__":
