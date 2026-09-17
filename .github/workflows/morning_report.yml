@@ -1,0 +1,28 @@
+name: morning report
+
+on:
+  schedule:
+    # 每天北京时间 08:05（UTC 00:05）—— 8:00 日界强平后第一时间的隔夜摘要
+    - cron: '5 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    env:
+      MAIL_USER: ${{ secrets.MAIL_USER }}
+      MAIL_PASS: ${{ secrets.MAIL_PASS }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: send morning report
+        run: python morning_report.py
+        timeout-minutes: 5
