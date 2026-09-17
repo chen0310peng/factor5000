@@ -762,8 +762,9 @@ def trade_engine(sym, sig, state, gate, DYNC, events):
 
     # —— 持仓管理 ——
     d = cur["dir"]
-    last = next((t for t in reversed(trades)
-                 if t["sym"] == sym and t.get("mode", "波段") == "波段" and t["exitPrice"] is None), None)
+    last = next((t for t in reversed(trades)   # 排除 local 合并单：只认引擎自己开的仓
+                 if t["sym"] == sym and t.get("mode", "波段") == "波段" and t["exitPrice"] is None
+                 and not t.get("local")), None)
     if last is None:
         pos[sym] = None; return None
     if cur["sizePct"] <= 0.05:   # 僵尸单自愈
@@ -875,8 +876,9 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
         return cur
 
     d = cur["dir"]
-    last = next((t for t in reversed(trades)
-                 if t["sym"] == sym and t.get("mode") == "日内" and t["exitPrice"] is None), None)
+    last = next((t for t in reversed(trades)   # 排除 local 合并单：只认引擎自己开的仓
+                 if t["sym"] == sym and t.get("mode") == "日内" and t["exitPrice"] is None
+                 and not t.get("local")), None)
     if last is None:
         pos[sym] = None; return None
     hold_h = (now_ms()-cur["entryTs"])/3600000
