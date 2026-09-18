@@ -45,17 +45,20 @@ def parse_events(lines):
         m2 = re.match(r"⚡日内开(多|空) (\w+) 第一手([\d.]+)% @ \$([\d,.]+)(.*)", e)
         if m2: it = {"kind": "open", "mode": "日内", "dir": m2.group(1), "sym": m2.group(2),
                      "size": num(m2.group(3)), "price": num(m2.group(4)), "tail": m2.group(5)}
-        m3 = re.match(r"➕ (\w+) (日内)?补仓 ([\d.]+)% @ \$([\d,.]+)，均价 \$([\d,.]+)", e)
-        if m3: it = {"kind": "add", "mode": "日内" if m3.group(2) else "波段", "sym": m3.group(1),
+        m2b = re.match(r"🔥超短线开(多|空) (\w+) 第一手([\d.]+)% @ \$([\d,.]+)(.*)", e)
+        if m2b: it = {"kind": "open", "mode": "超短线", "dir": m2b.group(1), "sym": m2b.group(2),
+                      "size": num(m2b.group(3)), "price": num(m2b.group(4)), "tail": m2b.group(5)}
+        m3 = re.match(r"➕ (\w+) (日内|超短线)?补仓 ([\d.]+)% @ \$([\d,.]+)，均价 \$([\d,.]+)", e)
+        if m3: it = {"kind": "add", "mode": m3.group(2) or "波段", "sym": m3.group(1),
                      "size": num(m3.group(3)), "price": num(m3.group(4)), "avg": num(m3.group(5))}
         m4 = re.match(r"([🛑💰🔄🩹]) ?(\w+) (.+?) @ \$([\d,.]+)（([+-][\d.]+)%）", e)
         if m4: it = {"kind": "close", "icon": m4.group(1), "sym": m4.group(2),
                      "reason": m4.group(3), "price": num(m4.group(4)), "pnl": num(m4.group(5))}
-        m5 = re.match(r"🏁 (\w+) 日内平仓 @ \$([\d,.]+)（(.+?)，([+-][\d.]+)%）", e)
-        if m5: it = {"kind": "close", "icon": "🏁", "sym": m5.group(1), "mode": "日内",
-                     "reason": m5.group(3), "price": num(m5.group(2)), "pnl": num(m5.group(4))}
-        m6 = re.match(r"💰 (\w+) (日内)?止盈([12])平?(.+?) @ \$([\d,.]+)，(.+)", e)
-        if m6: it = {"kind": "tp", "mode": "日内" if m6.group(2) else "波段", "sym": m6.group(1),
+        m5 = re.match(r"🏁 (\w+) (日内|超短线)平仓 @ \$([\d,.]+)（(.+?)，([+-][\d.]+)%）", e)
+        if m5: it = {"kind": "close", "icon": "🏁", "sym": m5.group(1), "mode": m5.group(2),
+                     "reason": m5.group(4), "price": num(m5.group(3)), "pnl": num(m5.group(5))}
+        m6 = re.match(r"💰 (\w+) (日内|超短线)?止盈([12])平?(.+?) @ \$([\d,.]+)，(.+)", e)
+        if m6: it = {"kind": "tp", "mode": m6.group(2) or "波段", "sym": m6.group(1),
                      "stage": m6.group(3), "portion": m6.group(4), "price": num(m6.group(5)), "note": m6.group(6)}
         m7 = re.match(r"⏰ (\w+) (波段|日内)持仓 ?([\d.]+) ?(天|h) ?未达止盈1，止损上移至成本 \$([\d,.]+)", e)
         if m7: it = {"kind": "movestop", "mode": m7.group(2), "sym": m7.group(1),
@@ -92,10 +95,13 @@ def hold_str(t0, t1):
             continue
     return "—"
 
+POS_KEY = {"波段": "positions", "日内": "positions_intra", "超短线": "positions_scalp"}
+MODE_ICON = {"波段": "🌊", "日内": "⚡", "超短线": "🔥"}
+
 def positions_overview(state):
     out = []
     price = {k: (v or {}).get("price") for k, v in (state.get("signals") or {}).items()}
-    for key, mode in (("positions", "波段"), ("positions_intra", "日内")):
+    for key, mode in (("positions", "波段"), ("positions_intra", "日内"), ("positions_scalp", "超短线")):
         for sym, p in (state.get(key) or {}).items():
             if not p: continue
             d = "多" if p.get("dir", 0) > 0 else "空"
@@ -143,7 +149,7 @@ def render(items, state):
     for it in items:
         k = it["kind"]
         if k == "open":
-            pos = (state.get("positions_intra" if it["mode"] == "日内" else "positions") or {}).get(it["sym"]) or {}
+            pos = (state.get(POS_KEY[it["mode"]]) or {}).get(it["sym"]) or {}
             badges = " ".join(f"〔{b.strip()}〕" for b in it["tail"].split("｜") if b.strip())
             rows = [("方向", f'{it["dir"]} {"📈" if it["dir"]=="多" else "📉"}', dir_color(it["dir"])),
                     ("开仓价", f'${fmt(it["price"])}', "#e6f1ff"),
@@ -151,10 +157,11 @@ def render(items, state):
                     ("止损", f'${fmt(pos.get("stop"))}', RED),
                     ("补仓位", f'${fmt(pos.get("add"))}' + (f'（再补 {pos.get("addPct"):.1f}%）' if pos.get("addPct") else ""), GOLD),
                     ("止盈1 / 2 / 3", f'{fmt(pos.get("tp1"))} / {fmt(pos.get("tp2"))} / {fmt(pos.get("tp3"))}', GREEN)]
-            cards.append(card(f'{"🆕" if it["mode"]=="波段" else "⚡"} {it["mode"]}开{it["dir"]} · {it["sym"]} 永续',
+            open_icon = {"波段": "🆕", "日内": "⚡", "超短线": "🔥"}[it["mode"]]
+            cards.append(card(f'{open_icon} {it["mode"]}开{it["dir"]} · {it["sym"]} 永续',
                               dir_color(it["dir"]), kv_table(rows), badges))
         elif k == "add":
-            pos = (state.get("positions_intra" if it["mode"] == "日内" else "positions") or {}).get(it["sym"]) or {}
+            pos = (state.get(POS_KEY[it["mode"]]) or {}).get(it["sym"]) or {}
             rows = [("补仓价", f'${fmt(it["price"])}', "#e6f1ff"),
                     ("新均价", f'${fmt(it["avg"])}', BLUE),
                     ("本笔补仓", f'{it["size"]:.1f}%', GOLD),
@@ -174,7 +181,7 @@ def render(items, state):
             note = f'<div style="font-size:12px;color:{GRAY};margin-top:4px;">{it.get("note","")}</div>' if it.get("note") else ""
             cards.append(card(f'{it["icon"]} {it["reason"]} · {it["sym"]}', pct_color(pnl or 0), kv_table(rows) + note))
         elif k == "tp":
-            pos = (state.get("positions_intra" if it["mode"] == "日内" else "positions") or {}).get(it["sym"]) or {}
+            pos = (state.get(POS_KEY[it["mode"]]) or {}).get(it["sym"]) or {}
             rows = [("止盈档位", f'止盈{it["stage"]}（{it["portion"]}）', GREEN),
                     ("成交价", f'${fmt(it["price"])}', "#e6f1ff"),
                     ("剩余仓位", f'{pos.get("sizePct")}%' if pos.get("sizePct") else "—", BLUE),
@@ -202,7 +209,7 @@ def render(items, state):
                 ("止损", fmt(p["stop"]), RED),
                 ("补仓位", "已补" if p.get("addDone") else fmt(p["add"]), GOLD),
                 ("止盈1/2/3", f'{fmt(p["tp1"])}/{fmt(p["tp2"])}/{fmt(p["tp3"])}', GREEN)]
-        pos_html += card(f'{"🌊" if p["mode"]=="波段" else "⚡"} {p["mode"]} · {p["sym"]} 永续',
+        pos_html += card(f'{MODE_ICON[p["mode"]]} {p["mode"]} · {p["sym"]} 永续',
                          dir_color(p["dir"]), kv_table(rows))
     if not pos_html:
         pos_html = f'<div style="color:{GRAY};font-size:13px;padding:6px 2px;">当前无持仓</div>'
