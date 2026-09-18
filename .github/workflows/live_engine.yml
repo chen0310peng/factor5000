@@ -1,8 +1,9 @@
-name: live engine (15min)
+name: live engine (5min)
 
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # 2026-09-18 起 5 分钟一巡：超短线引擎上云需要 5m 粒度（60分钟限时/追单回踩）
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 permissions:
