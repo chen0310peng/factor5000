@@ -937,14 +937,203 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
             events.append(f"➕ {sym} 日内补仓 {cur['addPct']:.1f}% @ ${P:,.1f}，均价 ${cur['entry']:,.1f}")
     return pos.get(sym)
 
+# ===================== 超短线引擎（2026-09-18 移植自网页 computeScalp/tradeEngineScalp，云端5分钟巡航） =====================
+def compute_scalp(d, dyn_sc):
+    """移植 computeScalp：动态因子池为主导，静态6均值回复因子兜底；含4h趋势过滤"""
+    K = d["k5"]; n = len(K)
+    c = np.array([x["c"] for x in K], float)
+    h = np.array([x["h"] for x in K], float)
+    l = np.array([x["l"] for x in K], float)
+    v = np.array([x["v"] for x in K], float)
+
+    def zs(a):
+        w = [x for x in a[-288:] if x is not None and np.isfinite(x)]
+        if len(w) < 30: return 0.0
+        m, s = mean(w), std(w) or 1e-12
+        return clamp((a[-1]-m)/s, -4, 4)
+
+    # 日内 VWAP 偏离（UTC日重置；day_open 记录当天第一根收盘价，与JS一致供日内动量使用）
+    cum_pv = cum_v = 0.0; cur_day = ""; day_open = c[0]
+    vwap_arr = []
+    for i in range(n):
+        day = time.strftime("%Y-%m-%d", time.gmtime(K[i]["t"]/1000))
+        if day != cur_day:
+            cur_day = day; cum_pv = cum_v = 0.0; day_open = c[i]
+        tp = (h[i]+l[i]+c[i])/3; cum_pv += tp*v[i]; cum_v += v[i]
+        vwap_arr.append(cum_pv/cum_v if cum_v > 0 else None)
+    z_vwap = zs([(c[i]-vwap_arr[i])/vwap_arr[i] if vwap_arr[i] else None for i in range(n)])
+    # ATR 倍数偏离
+    ema20 = []; e = c[0]; k20 = 2/21
+    for p in c:
+        e = p*k20+e*(1-k20); ema20.append(e)
+    tr5 = [h[0]-l[0]] + [max(h[i]-l[i], abs(h[i]-c[i-1]), abs(l[i]-c[i-1])) for i in range(1, n)]
+    atr5 = mean(tr5[-14:])
+    z_atr = zs([(c[i]-ema20[i])/(mean(tr5[max(0, i-13):i+1]) or 1e-9) for i in range(n)])
+    # RSI-14
+    rsi = [None]*n
+    for i in range(15, n):
+        up = dn = 0.0
+        for j in range(i-13, i+1):
+            ch = c[j]-c[j-1]
+            if ch > 0: up += ch
+            else: dn -= ch
+        rsi[i] = 100 if dn == 0 else 100-100/(1+up/dn)
+    z_rsi = zs(rsi)
+    # 布林 %B
+    pctb = [None]*n
+    for i in range(19, n):
+        w = c[i-19:i+1]; m = mean(w); s = std(w)
+        pctb[i] = (c[i]-(m-2*s))/(4*s) if s > 0 else 0.5
+    z_pctb = zs(pctb)
+    # 均线 Z-Score
+    pz = [None]*n
+    for i in range(49, n):
+        w = c[i-49:i+1]
+        pz[i] = (c[i]-mean(w))/(std(w) or 1e-9)
+    z_pz = zs(pz)
+    # 日内累计动量
+    z_mom = zs([p/day_open-1 if day_open else None for p in c])
+    F = [(z_vwap, 0.070), (z_atr, 0.063), (z_rsi, 0.063), (z_pctb, 0.060), (z_pz, 0.063), (z_mom, 0.060)]
+    wsum = sum(w for _, w in F)
+    ssig = clamp(sum(-w*z for z, w in F)/wsum, -3, 3)   # 6因子全部反向(dir=-1)
+    if dyn_sc is not None and np.isfinite(dyn_sc):
+        ssig = clamp(dyn_sc, -3, 3)
+    # 4h 趋势过滤：|tStr|>1.5 单边市禁止逆势单
+    c4 = np.array(d["h4"]["c"], float); h4h, h4l = d["h4"]["h"], d["h4"]["l"]
+    e4 = c4[0]; k4 = 2/21; ema4 = []
+    for p in c4:
+        e4 = p*k4+e4*(1-k4); ema4.append(e4)
+    tr4 = [h4h[0]-h4l[0]] + [max(h4h[i]-h4l[i], abs(h4h[i]-c4[i-1]), abs(h4l[i]-c4[i-1])) for i in range(1, len(c4))]
+    atr4v = mean(tr4[-14:])
+    t_str = (c4[-1]-ema4[-1])/(atr4v or 1e-9)
+    return {"ssig": ssig, "atr5": atr5, "price": float(c[-1]), "tStr": t_str,
+            "trending": abs(t_str) > 1.5, "trendDir": (1 if t_str > 0 else -1),
+            "hi": h.tolist(), "lo": l.tolist()}
+
+def scalp_regime_gate(sym, dync):
+    """移植 scalpRegimeGate：sc动态池近7日模拟（|S|≥1.2进、反向1.2或60分钟出、万4费），亏损且≥5笔→暂停"""
+    R = (dync or {}).get(sym) or {}
+    S = R.get("scSeries")
+    if not S: return {"blocked": False, "pnl": None}
+    t, comp, cc = S["t"], S["s"], S["c"]
+    if len(t) < 600: return {"blocked": False, "pnl": None}
+    spacing = (t[1]-t[0]) or 300000
+    bars7d = min(len(t)-2, round(7*86400000/spacing))
+    bars60m = max(1, round(3600000/spacing))
+    pos_d = 0; entry = 0.0; held = 0; pnl = 0.0; trades = 0
+    for i in range(len(t)-bars7d, len(t)-1):
+        Si = comp[i]
+        if not np.isfinite(Si): continue
+        if pos_d == 0:
+            if abs(Si) >= 1.2:
+                pos_d = 1 if Si > 0 else -1; entry = cc[i]; held = 0
+                pnl -= 0.0004; trades += 1
+        else:
+            held += 1
+            rev = (1 if Si > 0 else -1) == -pos_d and abs(Si) >= 1.2
+            if rev or held >= bars60m:
+                pnl += pos_d*(cc[i]/entry-1)-0.0004; pos_d = 0
+    if pos_d != 0: pnl += pos_d*(cc[-1]/entry-1)-0.0004
+    return {"blocked": pnl < 0 and trades >= 5, "pnl": pnl, "trades": trades}
+
+def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
+    """移植 tradeEngineScalp：第一手10%+跌1×ATR5补7%，止损-1.5×ATR5，三档止盈+1/+2/+3×ATR5，限时60分钟"""
+    pos = state.setdefault("positions_scalp", {})
+    trades = state.setdefault("trades", [])
+    P, A, S = ss["price"], ss["atr5"], ss["ssig"]
+    cur = norm_pos(pos.get(sym))
+    pos[sym] = cur
+    th = 1.5 if (defg or {}).get("highVol") else 1.2
+    zone = "LONG" if S >= th else ("SHORT" if S <= -th else "FLAT")
+    arm_update(state, "SC", sym, zone, 1 if zone == "LONG" else -1, P, cur is not None)
+    FIRST, ADD = 10, 7
+    if cur is None:
+        dir0 = 1 if zone == "LONG" else -1
+        pause_until = state.setdefault("scalp_pause", {}).get(sym, 0)
+        if zone != "FLAT" and ss["trending"] and dir0 != ss["trendDir"]:
+            events.append(f'🚫 {sym} 超短线{"多" if dir0 > 0 else "空"}信号被趋势过滤器拦截：'
+                          f'4h 单边{"多" if ss["trendDir"] > 0 else "空"}市（{ss["tStr"]:+.1f}×ATR），逆势均值回复单禁止开仓')
+        elif now_ms() < pause_until:
+            pass   # 同币种连续2次止损后的60分钟冷静期
+        elif zone != "FLAT" and not gate["blocked"] and not sc_gate["blocked"]:
+            cg = chase_check(state, "SC", sym, dir0, P, A, ss["hi"], ss["lo"], 0.6)
+            if not cg["pass"]:
+                events.append(f'🕐 {sym} 超短线{"多" if dir0 > 0 else "空"}信号已走出 {cg["ext"]:.1f}×ATR5'
+                              f'（参考{"近3根5m极值" if cg["proxy"] else "信号触发价"} ${cg["ref"]:,.1f}）→ 不追单，'
+                              f'{"回落至" if dir0 > 0 else "反弹至"} ${cg["waitLv"]:,.1f} {"下方" if dir0 > 0 else "上方"}自动开第一手')
+            else:
+                f_size, a_size = FIRST*gate["sizeMult"], ADD*gate["sizeMult"]
+                cur = {"sym": sym, "dir": dir0, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
+                       "sizePct": f_size, "addPct": a_size, "stop": P-dir0*1.5*A, "add": P-dir0*1.0*A,
+                       "tp1": P+dir0*1.0*A, "tp2": P+dir0*2.0*A, "tp3": P+dir0*3.0*A,
+                       "addDone": False, "tp1Done": False, "tp2Done": False}
+                pos[sym] = cur
+                trades.append({"id": new_trade_id(trades), "sym": sym, "dir": "多" if dir0 > 0 else "空",
+                               "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
+                               "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
+                               "status": "持仓中", "exitPrice": None, "exitTime": None,
+                               "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
+                events.append(f'🔥超短线开{"多" if dir0 > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
+                              f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时60分钟'
+                              + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+        return pos.get(sym)
+
+    d = cur["dir"]
+    last = next((t for t in reversed(trades)   # 排除 local 合并单：只认引擎自己开的仓
+                 if t["sym"] == sym and t.get("mode") == "超短线" and t["exitPrice"] is None
+                 and not t.get("local")), None)
+    if last is None:
+        pos[sym] = None; return None
+    hold_m = (now_ms()-cur["entryTs"])/60000
+    hit_dn = lambda lv: P <= lv if d > 0 else P >= lv
+    hit_up = lambda lv: P >= lv if d > 0 else P <= lv
+    reason = None
+    if hit_dn(cur["stop"]): reason = "触发止损"
+    elif hit_up(cur["tp3"]): reason = "止盈3清仓"
+    elif hold_m >= 60: reason = "超短线限时60分钟到点平仓"
+    elif (1 if S > 0 else -1) == -d and abs(S) >= 0.6: reason = "超短线信号反转"
+    if reason:
+        pnl = close_trade(cur, last, P, reason)
+        pos[sym] = None
+        events.append(f"🏁 {sym} 超短线平仓 @ ${P:,.1f}（{reason}，{pnl*100:+.2f}%）")
+        if reason == "触发止损":   # 同币种连续2次止损 → 暂停60分钟
+            consec = 0
+            for t in reversed(trades):
+                if t.get("mode") != "超短线" or t["sym"] != sym or t.get("pnl") is None: continue
+                if t.get("reason") == "触发止损": consec += 1
+                else: break
+            if consec >= 2:
+                state.setdefault("scalp_pause", {})[sym] = now_ms()+60*60000
+                events.append(f"⏸ {sym} 超短线连续{consec}次止损，暂停开新仓60分钟，震荡市不反复挨刀")
+        return None
+    if not cur["tp1Done"] and hit_up(cur["tp1"]):   # 止盈1落袋1/2，止损移到成本+0.1%费用缓冲
+        last["realized"] = (last.get("realized") or 0) + (cur["sizePct"]/2)*((P/cur["entry"]-1) if d > 0 else (1-P/cur["entry"]))
+        cur["tp1Done"] = True; cur["sizePct"] = cur["sizePct"]/2; cur["stop"] = cur["entry"]*(1+d*0.001)
+        last["status"] = "止盈1减1/2"
+        events.append(f'💰 {sym} 超短线止盈1平1/2 @ ${P:,.1f}，止损移至成本+费用 ${cur["stop"]:,.1f}（已锁定微盈）')
+    if cur["tp1Done"] and not cur["tp2Done"] and hit_up(cur["tp2"]):
+        last["realized"] = (last.get("realized") or 0) + (cur["sizePct"]/2)*((P/cur["entry"]-1) if d > 0 else (1-P/cur["entry"]))
+        cur["tp2Done"] = True; cur["sizePct"] = cur["sizePct"]/2; cur["stop"] = cur["tp1"]
+        last["status"] = "止盈2再减半"
+        events.append(f"💰 {sym} 超短线止盈2再减半 @ ${P:,.1f}，止损上移至止盈1")
+    if not cur["addDone"] and hit_dn(cur["add"]):
+        cur["addDone"] = True
+        new_size = cur["sizePct"]+cur["addPct"]
+        cur["entry"] = (cur["entry"]*cur["sizePct"] + P*cur["addPct"])/new_size
+        cur["sizePct"] = new_size
+        last["sizePct"] = round(new_size, 1); last["entry"] = cur["entry"]
+        last["added"] = bj_str() + f" @ ${P:,.1f}"
+        events.append(f"➕ {sym} 超短线补仓 {cur['addPct']:.1f}% @ ${P:,.1f}，均价 ${cur['entry']:,.1f}")
+    return pos.get(sym)
+
 # ===================== 状态读写与主流程 =====================
 def load_state(path):
     try:
         with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        return {"positions": {}, "positions_intra": {}, "trades": [], "events": [],
-                "arm": {}, "defense": {}, "sema": {}, "freeze": {},
+        return {"positions": {}, "positions_intra": {}, "positions_scalp": {}, "trades": [], "events": [],
+                "arm": {}, "defense": {}, "sema": {}, "freeze": {}, "scalp_pause": {},
                 "intra_flip_cd": {}, "intra_opp": {}, "intra_pause_until": 0}
 
 def save_state(path, state):
@@ -1025,6 +1214,16 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
         except Exception as e:
             print(f"⚠️ {k} 日内引擎异常: {e}", flush=True)
             import traceback; traceback.print_exc()
+        try:
+            sc_gate = scalp_regime_gate(k, DYNC)
+            dyn_sc = (DYNC.get(k, {}).get("sc") or {}).get("score") if DYNC else None
+            ssig = compute_scalp(bn[k], dyn_sc)
+            trade_engine_scalp(k, ssig, state, gate, sc_gate, DEFG.get(k), events)
+            print(f"{k} 超短线: sig={ssig['ssig']:+.2f} 持仓={'有' if state['positions_scalp'].get(k) else '无'}"
+                  f" 闸门={'关' if sc_gate['blocked'] else '开'}", flush=True)
+        except Exception as e:
+            print(f"⚠️ {k} 超短线引擎异常: {e}", flush=True)
+            import traceback; traceback.print_exc()
     # 6) 信号快照（网页展示用）
     state["signals"] = {}
     for k in bn:
@@ -1037,6 +1236,8 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
                 "intraSig": isig_ok,
                 "swLive": DYNC.get(k, {}).get("sw", {}).get("live") if DYNC else None,
                 "idLive": DYNC.get(k, {}).get("id", {}).get("live") if DYNC else None,
+                "scalpSig": (DYNC.get(k, {}).get("sc") or {}).get("score") if DYNC else None,
+                "scLive": DYNC.get(k, {}).get("sc", {}).get("live") if DYNC else None,
             }
         except Exception:
             pass
@@ -1049,7 +1250,7 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
         if not any(e in r for r in recent):
             state.setdefault("events", []).append(line)
     save_state(state_path, state)
-    TRADE_ICONS = ("🆕", "⚡", "🛑", "💰", "🔄", "🏁", "🛡", "⏰", "🩹")
+    TRADE_ICONS = ("🆕", "⚡", "🔥", "🛑", "💰", "🔄", "🏁", "🛡", "⏰", "🩹")
     trade_evs = [e for e in events if e.startswith(TRADE_ICONS)]
     print(f"完成：{len(events)} 条事件（{len(trade_evs)} 条交易类），状态已写入 {state_path}", flush=True)
     # 交易类事件写入标记文件，供 workflow 决定是否发邮件（只含开平仓等交易事件，不含追单提示等噪音）
