@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from send_mail import (BJ, GREEN, RED, BLUE, GRAY, GOLD, BG, CARD, BORDER,
-                       fmt, pct_color, dir_color, kv_table, card,
+                       fmt, pct_color, dir_color, kv_table, card, MODE_ICON,
                        positions_overview, ledger_stats, hold_str, bj_now)
 from email.mime.text import MIMEText
 from email.header import Header
@@ -100,7 +100,7 @@ def render_morning(state):
                 ("止损", fmt(p["stop"]), RED),
                 ("补仓位", "已补" if p.get("addDone") else fmt(p["add"]), GOLD),
                 ("止盈1/2/3", f'{fmt(p["tp1"])}/{fmt(p["tp2"])}/{fmt(p["tp3"])}', GREEN)]
-        pos_html += card(f'{"🌊" if p["mode"]=="波段" else "⚡"} {p["mode"]} · {p["sym"]} 永续',
+        pos_html += card(f'{MODE_ICON[p["mode"]]} {p["mode"]} · {p["sym"]} 永续',
                          dir_color(p["dir"]), kv_table(rows))
     if not pos_html:
         pos_html = f'<div style="color:{GRAY};font-size:13px;padding:6px 2px;">当前无持仓</div>'
