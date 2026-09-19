@@ -1181,7 +1181,9 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
             bn[k]["dynID"] = DYNC[k]["id"]["score"] if DYNC[k].get("id") else None
             ns = DYNC[k].get("ns")
             if ns and ns["triggered"]:
-                fz = max(x["freeze"] for x in ns["triggered"])
+                # 2026-09-19 加强：消息市有尾巴，60分钟常常不够（9-17 案例：防御触发后1小时内行情仍单边延续），
+                # 冻结期下限提至 120 分钟；因子自定义更长冻结期时仍从其长
+                fz = max(120, max(x["freeze"] for x in ns["triggered"]))
                 state.setdefault("freeze", {})[k] = now_ms()+fz*60000
                 events.append(f"⚠️ {k} 消息面动态防御触发（{len(ns['triggered'])}条警报）→ {fz}分钟内禁止开新仓")
     except Exception as e:
