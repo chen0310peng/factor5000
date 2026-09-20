@@ -36,8 +36,25 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/factor5000/selected_top500.json data/factor5000/daily_summary.txt
           git diff --cached --quiet || git commit -m "daily factor selection"
-          git pull --rebase origin main
-          git push || (git pull --rebase origin main && git push)
+          # 冲突自愈：rebase 失败时以本次运行结果为准，重置到远端后重放提交
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            mkdir -p /tmp/fac_keep
+            cp data/factor5000/selected_top500.json data/factor5000/daily_summary.txt /tmp/fac_keep/ 2>/dev/null || true
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/fac_keep/selected_top500.json data/factor5000/selected_top500.json 2>/dev/null || true
+            cp /tmp/fac_keep/daily_summary.txt data/factor5000/daily_summary.txt 2>/dev/null || true
+            git add data/factor5000/selected_top500.json data/factor5000/daily_summary.txt
+            git diff --cached --quiet || git commit -m "daily factor selection (conflict replay)"
+            git push && exit 0
+            sleep 5
+          done
+          echo "::warning::push result failed after retries"
+          exit 1
 
       - name: read summary
         id: sum
