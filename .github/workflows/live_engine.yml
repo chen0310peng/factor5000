@@ -41,8 +41,23 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/live_state.json
           git diff --cached --quiet || git commit -m "live state $(date -u +'%m-%d %H:%M')"
-          git pull --rebase origin main
-          git push || (git pull --rebase origin main && git push)
+          # 冲突自愈：rebase 失败时以本次运行的新状态为准，重置到远端后重放提交（2026-09-20 单次失败根因）
+          for i in 1 2 3; do
+            if git pull --rebase origin main && git push; then
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            cp data/live_state.json /tmp/live_state_keep.json
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/live_state_keep.json data/live_state.json
+            git add data/live_state.json
+            git diff --cached --quiet || git commit -m "live state $(date -u +'%m-%d %H:%M') (conflict replay)"
+            git push && exit 0
+            sleep 5
+          done
+          echo "::warning::push state failed after retries"
+          exit 1
 
       - name: send trade email (HTML)
         if: always() && env.MAIL_TO != '' && hashFiles('data/live_events_pending.txt') != ''
