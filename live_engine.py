@@ -26,6 +26,10 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dsl  # noqa: E402  复用云端因子公式函数库（HMA/RSI/ATR...）
+try:
+    import structure as stmod   # noqa: E402  市场结构识别（OB订单块/FVG/摆动点）
+except Exception:
+    stmod = None
 
 # ===================== 配置 =====================
 STATE_PATH   = os.environ.get("LIVE_STATE", "data/live_state.json")
@@ -41,9 +45,25 @@ S = requests.Session(); S.headers.update({"User-Agent": "Mozilla/5.0"})
 
 # —— 波段新增保护规则（见文件头注释） ——
 SW_TRAIL_ARM_ATR   = 0.5   # 浮盈达到 0.5×ATR 激活回撤保护
-SW_TRAIL_GIVEBACK  = 0.5   # 从峰值回吐 50% 平仓
+SW_TRAIL_GIVEBACK  = 0.5   # 从峰值回吐 50% 平仓（TAPER_GIVEBACK 开启时被递减比例替代）
 SW_TIME_STOP_DAYS  = 5     # ≥5 天未达止盈1 → 止损移成本
 SW_MAX_HOLD_DAYS   = 15    # ≥15 天 → 强平
+
+# —— 结构化止盈止损（2026-09-21，structure.py；根治"有盈利保护不住"） ——
+STRUCT_ON        = False   # 开仓止损锚定结构位——2026-09-21回测否定（止损次数翻倍），保留代码备用
+STRUCT_TP_ALIGN  = True    # 止盈位与前方反向结构区对齐（到结构位先落袋）
+LADDER_LOCK_ON   = True    # 阶梯锁利：浮盈≥1/2/3×ATR → 止损→成本/锁1ATR/吊灯(峰值-1.5ATR)
+TAPER_GIVEBACK   = True    # 递减回吐：峰值<1/2/3/≥3×ATR 允许回吐 60/45/35/25%（替代一刀切50%）
+STRUCT_TRAIL_ON  = True    # 结构跟随：新的同向结构位形成时止损跟上（只向盈利方向）
+STRUCT_SHADOW    = True    # 影子模式：只记录"本应如何"，不实际执行（观察期后关闭）
+# —— 可调参数（回测扫参与生产微调共用） ——
+STOP_MIN_ATR     = 0.8     # 结构止损最近距离（防噪声扫损）
+STOP_MAX_ATR     = 2.5     # 结构止损最远距离（超过则回退1.5×ATR经典止损）
+LAD_T1, LAD_T2, LAD_T3 = 1.0, 2.0, 3.0   # 阶梯触发档（×ATR）
+LAD_LOCK2        = 1.0     # 第二档锁定利润（×ATR）
+CHAND_K          = 1.5     # 吊灯：峰值价 - CHAND_K×ATR
+GB_TIERS         = (0.60, 0.45, 0.35, 0.25)   # 峰值<1/<2/<3/≥3×ATR 的允许回吐比例
+GB_ARM_ATR       = 1.5     # 回撤保护启动门槛（回测定案：0.5太敏感掐死小浮盈，1.5让阶梯锁利先干活）
 
 # 防御层灵敏度（与网页 standard 档一致）
 DEFTH = dict(nr7=0.14, fundZ=2.0, pinZ=2.5, pinVol=1.5, taker=0.03,
@@ -711,8 +731,84 @@ def close_trade(cur, last, P, reason):
 def new_trade_id(trades):
     return (trades[-1]["id"]+1) if trades else 1
 
+# ===================== 结构化止盈止损辅助（2026-09-21 阶段1/2） =====================
+def struct_snap(ohlc, price):
+    """从引擎的周期数据dict构造结构快照；数据不足或模块缺失返回 None"""
+    if stmod is None or not ohlc or len(ohlc.get("c", [])) < 60: return None
+    try:
+        return stmod.structure_levels(np.array(ohlc["o"], float), np.array(ohlc["h"], float),
+                                      np.array(ohlc["l"], float), np.array(ohlc["c"], float),
+                                      np.array(ohlc["v"], float), price=price)
+    except Exception:
+        return None
+
+def structural_stop(P, d, A, snap):
+    """开仓止损锚定结构位：多头取最近支撑（OB底/摆动低/FVG底），止损=支撑-0.2×ATR。
+    距离钳制在 [0.8, 2.5]×ATR：太近防噪声扫损，太远回退经典 1.5×ATR。
+    返回 (stop, risk_scale, tag)；risk_scale 用于仓位缩放保持单笔风险一致。"""
+    if not snap: return None, 1.0, ""
+    lv = None
+    if d > 0 and snap.get("supports"): lv = snap["supports"][0][0] - 0.2*A
+    if d < 0 and snap.get("resists"):  lv = snap["resists"][0][0] + 0.2*A
+    if lv is None: return None, 1.0, ""
+    tag = (snap["supports"][0][1] if d > 0 else snap["resists"][0][1])
+    dist = abs(P-lv)
+    if dist < STOP_MIN_ATR*A: return P-d*STOP_MIN_ATR*A, 1.0, tag+"·近"
+    if dist > STOP_MAX_ATR*A: return None, 1.0, ""          # 结构太远，回退 1.5×ATR
+    return lv, clamp(1.5*A/dist, 0.5, 1.2), tag
+
+def align_tp(P, d, A, snap, mults=(1.0, 2.0, 3.0)):
+    """止盈位与前方反向结构区对齐：结构位落在该档 ATR 窗口内时，止盈设在结构位前 0.1×ATR。
+    保持 tp1<tp2<tp3（多头）单调。返回 [tp1,tp2,tp3] 与对齐标记。"""
+    tps = [P+d*m*A for m in mults]
+    if not snap: return tps, ""
+    zones = [p for p, _ in (snap["resists"] if d > 0 else snap["supports"])]
+    tags = []
+    windows = [(0.55, 1.7), (1.6, 2.7), (2.6, 4.5)]
+    for k, m in enumerate(mults):
+        lo, hi = windows[k]
+        cand = [z for z in zones if lo*A < (z-P)*d < hi*A]
+        if cand:
+            z = min(cand, key=lambda p: abs(p-P))           # 最近的结构位
+            zt = z-d*0.1*A                                   # 落在结构位之前，先落袋
+            if (zt-P)*d > 0.3*A:
+                tps[k] = zt; tags.append(f"tp{k+1}→结构位")
+    for k in (1, 2):                                          # 强制单调
+        if (tps[k]-tps[k-1])*d < 0.3*A: tps[k] = tps[k-1]+d*0.3*A
+    return tps, ("🏹" + ",".join(tags) if tags else "")
+
+def ladder_floor(cur, d):
+    """阶梯锁利：按浮盈峰值档位返回止损下限（只向盈利方向使用）。
+    档位由 LAD_T1/T2/T3、LAD_LOCK2、CHAND_K 控制。"""
+    A0 = cur.get("atrEntry") or 0
+    if A0 <= 0: return None
+    atrp = A0/cur["entry"]; pk = cur.get("peakMfe", 0.0)
+    if pk >= LAD_T3*atrp:
+        peakP = cur["entry"]*(1+d*pk)
+        return peakP-d*CHAND_K*A0, "吊灯锁利"
+    if pk >= LAD_T2*atrp: return cur["entry"]+d*LAD_LOCK2*A0, f"锁{LAD_LOCK2:g}×ATR利润"
+    if pk >= LAD_T1*atrp: return cur["entry"]+d*0.05*A0, "锁成本"
+    return None
+
+def taper_giveback(peak, atrp):
+    """递减回吐比例：浮盈峰值越大，允许回吐越小（GB_TIERS 四档）"""
+    x = peak/atrp if atrp > 0 else 0
+    g = GB_TIERS
+    return g[0] if x < 1 else g[1] if x < 2 else g[2] if x < 3 else g[3]
+
+def trail_struct(cur, d, P, snap):
+    """结构跟随：出现比当前止损更优的同向结构位时返回新止损（只向盈利方向）"""
+    if not snap: return None
+    A0 = cur.get("atrEntry") or 0
+    if A0 <= 0: return None
+    if d > 0:
+        cands = [p for p, _ in snap.get("supports", []) if cur["stop"]+0.2*A0 < p < P]
+        return (max(cands)-0.2*A0) if cands else None
+    cands = [p for p, _ in snap.get("resists", []) if P < p < cur["stop"]-0.2*A0]
+    return (min(cands)+0.2*A0) if cands else None
+
 # ===================== 波段引擎（移植 tradeEngine + 2026-09-06 新增保护规则） =====================
-def trade_engine(sym, sig, state, gate, DYNC, events):
+def trade_engine(sym, sig, state, gate, DYNC, events, snap=None):
     pos = state.setdefault("positions", {})
     trades = state.setdefault("trades", [])
     P, A, S = sig["price"], sig["atr"], sig["S"]
@@ -741,11 +837,26 @@ def trade_engine(sym, sig, state, gate, DYNC, events):
             half_guard = consec_sl >= 2
             if half_guard: target /= 2
             if target < 1: return None   # 凯利上限≈0 不开僵尸单
-            first_pct = target/2
+            # —— 结构化止损/止盈（2026-09-21）：结构位锚定 + 止盈对齐反向结构区 ——
+            stop0, tps, risk_scale, s_note, tp_note = P-d*1.5*A, None, 1.0, "", ""
+            if STRUCT_ON and snap:
+                s_stop, risk_scale, s_tag = structural_stop(P, d, A, snap)
+                if s_stop is not None:
+                    if STRUCT_SHADOW:
+                        s_note = f'｜🔮影子:结构止损应 ${s_stop:,.1f}({s_tag},仓位×{risk_scale:.2f})'
+                        risk_scale = 1.0
+                    else:
+                        stop0 = s_stop; s_note = f"｜🏗结构止损({s_tag})"
+            if STRUCT_TP_ALIGN and snap:
+                tps, tp_note = align_tp(P, d, A, snap)
+                if STRUCT_SHADOW and tp_note: tp_note = f'｜🔮影子:止盈应对齐 {[round(t,1) for t in tps]}'
+            if STRUCT_SHADOW: tps = None                 # 影子模式不动实际止盈位
+            if tps is None: tps = [P+d*1.0*A, P+d*2.0*A, P+d*3.0*A]
+            first_pct = target/2*risk_scale
             cur = {"sym": sym, "dir": d, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
-                   "sizePct": first_pct, "targetPct": target, "addPct": target-first_pct,
-                   "stop": P-d*1.5*A, "add": P-d*1.0*A,
-                   "tp1": P+d*1.0*A, "tp2": P+d*2.0*A, "tp3": P+d*3.0*A,
+                   "sizePct": first_pct, "targetPct": target*risk_scale, "addPct": target*risk_scale-first_pct,
+                   "stop": stop0, "add": P-d*1.0*A,
+                   "tp1": tps[0], "tp2": tps[1], "tp3": tps[2],
                    "addDone": False, "tp1Done": False, "tp2Done": False,
                    "halfGuard": half_guard, "atrEntry": A, "peakMfe": 0.0}
             pos[sym] = cur
@@ -755,7 +866,9 @@ def trade_engine(sym, sig, state, gate, DYNC, events):
                            "status": "持仓中", "exitPrice": None, "exitTime": None,
                            "pnl": None, "reason": "", "mode": "波段", "realized": 0})
             events.append(f'🆕 开{"多" if d > 0 else "空"} {sym} 第一手 {first_pct:.1f}% @ ${P:,.1f}'
-                          f'｜补仓位 ${cur["add"]:,.1f} 再补 {target-first_pct:.1f}%'
+                          f'｜补仓位 ${cur["add"]:,.1f} 再补 {cur["addPct"]:.1f}%'
+                          f'｜止损 ${cur["stop"]:,.1f}｜止盈 {cur["tp1"]:,.0f}/{cur["tp2"]:,.0f}/{cur["tp3"]:,.0f}'
+                          + s_note + tp_note
                           + (f'｜🛡 连亏{consec_sl}次保护：本次仓位减半' if half_guard else '')
                           + ('｜🛡 高波动态：仓位减半' if gate["sizeMult"] < 1 else ''))
         return cur
@@ -784,17 +897,46 @@ def trade_engine(sym, sig, state, gate, DYNC, events):
         pnl = close_trade(cur, last, P, "止盈3清仓"); pos[sym] = None
         events.append(f"💰 {sym} 止盈3清仓 @ ${P:,.1f}（{pnl*100:+.2f}%）")
     else:
-        # ★ 新增①：浮盈回撤保护——浮盈曾≥0.5×ATR 且从峰值回吐≥50% → 落袋
+        # ★ 阶梯锁利 + 结构跟随（2026-09-21 阶段1）：止损只向盈利方向移动
+        if LADDER_LOCK_ON or STRUCT_TRAIL_ON:
+            new_stop, how = None, ""
+            if LADDER_LOCK_ON:
+                lf = ladder_floor(cur, d)
+                if lf: new_stop, how = lf
+            if STRUCT_TRAIL_ON and snap:
+                ts = trail_struct(cur, d, P, snap)
+                if ts is not None and (new_stop is None or (ts-new_stop)*d > 0):
+                    new_stop, how = ts, "结构跟随"
+            if new_stop is not None and (new_stop-cur["stop"])*d > 0:
+                if STRUCT_SHADOW:
+                    mark = f"{how}@{round(new_stop,1)}"
+                    if cur.get("_shadowStop") != mark:
+                        cur["_shadowStop"] = mark
+                        events.append(f"🔮影子 {sym} 阶梯/结构锁利：止损 {cur['stop']:,.1f} 本应上移至 "
+                                      f"${new_stop:,.1f}（{how}，浮盈峰值 {cur['peakMfe']*100:+.2f}%）")
+                else:
+                    old = cur["stop"]; cur["stop"] = new_stop
+                    events.append(f"🪜 {sym} {how}：止损 ${old:,.1f} → ${new_stop:,.1f}"
+                                  f"（浮盈峰值 {cur['peakMfe']*100:+.2f}%）")
+        # ★ 浮盈回撤保护（2026-09-21 改为递减回吐：峰值越大允许回吐越小；不再限 tp1 前）
         atr_pct = cur["atrEntry"]/cur["entry"] if cur.get("atrEntry") else 0
-        if (not cur["tp1Done"] and atr_pct > 0
-                and cur["peakMfe"] >= SW_TRAIL_ARM_ATR*atr_pct
-                and mfe <= cur["peakMfe"]*SW_TRAIL_GIVEBACK):
-            pnl = close_trade(cur, last, P,
-                              f"浮盈回撤保护（峰值{cur['peakMfe']*100:+.2f}%→{mfe*100:+.2f}%）")
-            pos[sym] = None
-            events.append(f"🛡 {sym} 浮盈回撤保护平仓 @ ${P:,.1f}：浮盈峰值 {cur['peakMfe']*100:+.2f}% "
-                          f"回吐至 {mfe*100:+.2f}%（{pnl*100:+.2f}%）——不再让利润坐过山车")
-            return None
+        gb = taper_giveback(cur["peakMfe"], atr_pct) if TAPER_GIVEBACK else SW_TRAIL_GIVEBACK
+        arm = GB_ARM_ATR if TAPER_GIVEBACK else SW_TRAIL_ARM_ATR
+        if (atr_pct > 0 and cur["peakMfe"] >= arm*atr_pct
+                and mfe <= cur["peakMfe"]*gb
+                and (TAPER_GIVEBACK or not cur["tp1Done"])):
+            if STRUCT_SHADOW:
+                if not cur.get("_shadowGb"):
+                    cur["_shadowGb"] = True
+                    events.append(f"🔮影子 {sym} 回撤保护：浮盈峰值 {cur['peakMfe']*100:+.2f}% 回吐至 "
+                                  f"{mfe*100:+.2f}%（阈值{gb*100:.0f}%），本应平仓落袋 @ ${P:,.1f}")
+            else:
+                pnl = close_trade(cur, last, P,
+                                  f"浮盈回撤保护（峰值{cur['peakMfe']*100:+.2f}%→{mfe*100:+.2f}%，阈值{gb*100:.0f}%）")
+                pos[sym] = None
+                events.append(f"🛡 {sym} 浮盈回撤保护平仓 @ ${P:,.1f}：浮盈峰值 {cur['peakMfe']*100:+.2f}% "
+                              f"回吐至 {mfe*100:+.2f}%（{pnl*100:+.2f}%）——不再让利润坐过山车")
+                return None
         # ★ 新增②：波段时间止损——≥5天未达止盈1，止损上移成本（日内早有，波段补上）
         hold_days = (now_ms()-cur["entryTs"])/86400000
         if (hold_days >= SW_TIME_STOP_DAYS and not cur["tp1Done"]
@@ -809,12 +951,14 @@ def trade_engine(sym, sig, state, gate, DYNC, events):
             return None
         if not cur["tp1Done"] and hit_up(cur["tp1"]):
             last["realized"] = (last.get("realized") or 0) + (cur["sizePct"]/3)*mfe
-            cur["tp1Done"] = True; cur["sizePct"] = cur["sizePct"]*2/3; cur["stop"] = cur["entry"]
+            cur["tp1Done"] = True; cur["sizePct"] = cur["sizePct"]*2/3
+            if (cur["entry"]-cur["stop"])*d > 0: cur["stop"] = cur["entry"]   # 单调上移：不覆盖阶梯/结构的更优止损
             last["status"] = "止盈1减1/3"; last["tp1Hit"] = bj_str()
             events.append(f"💰 {sym} 止盈1平1/3 @ ${P:,.1f}，止损已移至成本")
         if cur["tp1Done"] and not cur["tp2Done"] and hit_up(cur["tp2"]):
             last["realized"] = (last.get("realized") or 0) + (cur["sizePct"]/2)*mfe
-            cur["tp2Done"] = True; cur["sizePct"] = cur["sizePct"]/2; cur["stop"] = cur["tp1"]
+            cur["tp2Done"] = True; cur["sizePct"] = cur["sizePct"]/2
+            if (cur["tp1"]-cur["stop"])*d > 0: cur["stop"] = cur["tp1"]       # 单调上移
             last["status"] = "止盈2再减半"; last["tp2Hit"] = bj_str()
             events.append(f"💰 {sym} 止盈2再减半 @ ${P:,.1f}，止损上移至止盈1 ${cur['tp1']:,.1f}")
         if not cur["addDone"] and hit(cur["add"]):
@@ -832,7 +976,7 @@ def trade_engine(sym, sig, state, gate, DYNC, events):
     return pos.get(sym)
 
 # ===================== 日内引擎（移植 tradeEngineIntra） =====================
-def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
+def trade_engine_intra(sym, isig, state, gate, intra_gate, events, snap=None):
     pos = state.setdefault("positions_intra", {})
     trades = state.setdefault("trades", [])
     P, A, S = isig["price"], isig["atr4"], isig["sig"]
@@ -858,10 +1002,26 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
                               f'{"下方" if d > 0 else "上方"}自动开第一手')
                 return None
             f_size, a_size = FIRST*gate["sizeMult"], ADD*gate["sizeMult"]
+            # —— 结构化止损/止盈（2026-09-21，与波段同规则） ——
+            stop0, tps, risk_scale, s_note, tp_note = P-d*1.5*A, None, 1.0, "", ""
+            if STRUCT_ON and snap:
+                s_stop, risk_scale, s_tag = structural_stop(P, d, A, snap)
+                if s_stop is not None:
+                    if STRUCT_SHADOW:
+                        s_note = f'｜🔮影子:结构止损应 ${s_stop:,.1f}({s_tag},仓位×{risk_scale:.2f})'
+                        risk_scale = 1.0
+                    else:
+                        stop0 = s_stop; s_note = f"｜🏗结构止损({s_tag})"
+            if STRUCT_TP_ALIGN and snap:
+                tps, tp_note = align_tp(P, d, A, snap)
+                if STRUCT_SHADOW and tp_note: tp_note = f'｜🔮影子:止盈应对齐 {[round(t,1) for t in tps]}'
+            if STRUCT_SHADOW: tps = None
+            if tps is None: tps = [P+d*1.0*A, P+d*2.0*A, P+d*3.0*A]
+            f_size *= risk_scale; a_size *= risk_scale
             cur = {"sym": sym, "dir": d, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
                    "sizePct": f_size, "addPct": a_size,
-                   "stop": P-d*1.5*A, "add": P-d*1.0*A,
-                   "tp1": P+d*1.0*A, "tp2": P+d*2.0*A, "tp3": P+d*3.0*A,
+                   "stop": stop0, "add": P-d*1.0*A,
+                   "tp1": tps[0], "tp2": tps[1], "tp3": tps[2],
                    "addDone": False, "tp1Done": False, "tp2Done": False, "intra": True,
                    "atrEntry": A, "peakMfe": 0.0}
             pos[sym] = cur
@@ -872,6 +1032,8 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
                            "pnl": None, "reason": "", "mode": "日内", "realized": 0})
             events.append(f'⚡日内开{"多" if d > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                           f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%'
+                          f'｜止损 ${cur["stop"]:,.1f}｜止盈 {cur["tp1"]:,.0f}/{cur["tp2"]:,.0f}/{cur["tp3"]:,.0f}'
+                          + s_note + tp_note
                           + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
         return cur
 
@@ -912,19 +1074,59 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events):
                 state["intra_pause_until"] = now_ms()+2*3600000
                 events.append(f"⏸ 日内连续{consec}次止损，暂停开新仓2小时，冷静一下")
     else:
+        mfe = (P/cur["entry"]-1) if d > 0 else (1-P/cur["entry"])
+        cur["peakMfe"] = max(cur.get("peakMfe", 0.0), mfe)
+        # ★ 阶梯锁利 + 结构跟随（2026-09-21 阶段1，日内同步接入）
+        if LADDER_LOCK_ON or STRUCT_TRAIL_ON:
+            new_stop, how = None, ""
+            if LADDER_LOCK_ON:
+                lf = ladder_floor(cur, d)
+                if lf: new_stop, how = lf
+            if STRUCT_TRAIL_ON and snap:
+                ts = trail_struct(cur, d, P, snap)
+                if ts is not None and (new_stop is None or (ts-new_stop)*d > 0):
+                    new_stop, how = ts, "结构跟随"
+            if new_stop is not None and (new_stop-cur["stop"])*d > 0:
+                if STRUCT_SHADOW:
+                    mark = f"{how}@{round(new_stop,1)}"
+                    if cur.get("_shadowStop") != mark:
+                        cur["_shadowStop"] = mark
+                        events.append(f"🔮影子 {sym} 日内阶梯/结构锁利：止损 {cur['stop']:,.1f} 本应上移至 "
+                                      f"${new_stop:,.1f}（{how}，浮盈峰值 {cur['peakMfe']*100:+.2f}%）")
+                else:
+                    old = cur["stop"]; cur["stop"] = new_stop
+                    events.append(f"🪜 {sym} 日内{how}：止损 ${old:,.1f} → ${new_stop:,.1f}"
+                                  f"（浮盈峰值 {cur['peakMfe']*100:+.2f}%）")
+        # ★ 日内浮盈回撤保护（2026-09-21 新增：日内此前没有回撤保护）
+        atr_pct = cur["atrEntry"]/cur["entry"] if cur.get("atrEntry") else 0
+        gb = taper_giveback(cur["peakMfe"], atr_pct) if TAPER_GIVEBACK else SW_TRAIL_GIVEBACK
+        arm = GB_ARM_ATR if TAPER_GIVEBACK else SW_TRAIL_ARM_ATR
+        if (atr_pct > 0 and cur["peakMfe"] >= arm*atr_pct and mfe <= cur["peakMfe"]*gb):
+            if STRUCT_SHADOW:
+                if not cur.get("_shadowGb"):
+                    cur["_shadowGb"] = True
+                    events.append(f"🔮影子 {sym} 日内回撤保护：峰值 {cur['peakMfe']*100:+.2f}% 回吐至 "
+                                  f"{mfe*100:+.2f}%（阈值{gb*100:.0f}%），本应平仓落袋 @ ${P:,.1f}")
+            else:
+                pnl = close_trade(cur, last, P,
+                                  f"日内浮盈回撤保护（峰值{cur['peakMfe']*100:+.2f}%→{mfe*100:+.2f}%）")
+                pos[sym] = None
+                events.append(f"🛡 {sym} 日内浮盈回撤保护平仓 @ ${P:,.1f}（{pnl*100:+.2f}%）")
+                return None
         if (hold_h >= 12 and not cur["tp1Done"]
                 and ((d > 0 and cur["stop"] < cur["entry"]) or (d < 0 and cur["stop"] > cur["entry"]))):
             cur["stop"] = cur["entry"]
             events.append(f"⏰ {sym} 日内持仓 {hold_h:.1f}h 未达止盈1，止损上移至成本 ${cur['entry']:,.1f}")
-        mfe = (P/cur["entry"]-1) if d > 0 else (1-P/cur["entry"])
         if not cur["tp1Done"] and hit_up(cur["tp1"]):
             last["realized"] = (last.get("realized") or 0) + (cur["sizePct"]/3)*mfe
-            cur["tp1Done"] = True; cur["sizePct"] = cur["sizePct"]*2/3; cur["stop"] = cur["entry"]
+            cur["tp1Done"] = True; cur["sizePct"] = cur["sizePct"]*2/3
+            if (cur["entry"]-cur["stop"])*d > 0: cur["stop"] = cur["entry"]   # 单调上移
             last["status"] = "止盈1减1/3"
             events.append(f"💰 {sym} 日内止盈1平1/3 @ ${P:,.1f}，止损移至成本")
         if cur["tp1Done"] and not cur["tp2Done"] and hit_up(cur["tp2"]):
             last["realized"] = (last.get("realized") or 0) + (cur["sizePct"]/2)*mfe
-            cur["tp2Done"] = True; cur["sizePct"] = cur["sizePct"]/2; cur["stop"] = cur["tp1"]
+            cur["tp2Done"] = True; cur["sizePct"] = cur["sizePct"]/2
+            if (cur["tp1"]-cur["stop"])*d > 0: cur["stop"] = cur["tp1"]       # 单调上移
             last["status"] = "止盈2再减半"
             events.append(f"💰 {sym} 日内止盈2再减半 @ ${P:,.1f}，止损上移至止盈1")
         if not cur["addDone"] and hit(cur["add"]):
@@ -1201,7 +1403,8 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
         gate = def_gate(k, DEFG, DYNC, MACROG, TIMEG, state)
         try:
             sig = compute_signal(bn[k])
-            trade_engine(k, sig, state, gate, DYNC, events)
+            snap4 = struct_snap(bn[k].get("h4"), sig["price"])
+            trade_engine(k, sig, state, gate, DYNC, events, snap=snap4)
             print(f"{k} 波段: S={sig['S']:+.2f} dyn={sig['dynSW'] if sig['dynSW'] is not None else '—'} "
                   f"finalPos={sig['finalPos']:+.2f} 持仓={'有' if state['positions'].get(k) else '无'}", flush=True)
         except Exception as e:
@@ -1210,7 +1413,8 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
         try:
             igate = intra_regime_gate(k, bn[k], DYNC) if k in DYNC else {"blocked": False, "pnl": None}
             isig = compute_intraday(bn[k], k, state)
-            trade_engine_intra(k, isig, state, gate, igate, events)
+            snap1 = struct_snap(bn[k].get("k1h"), isig["price"])
+            trade_engine_intra(k, isig, state, gate, igate, events, snap=snap1)
             print(f"{k} 日内: sig={isig['sig']:+.2f} 持仓={'有' if state['positions_intra'].get(k) else '无'}"
                   f" 闸门={'关' if igate['blocked'] else '开'}", flush=True)
         except Exception as e:
