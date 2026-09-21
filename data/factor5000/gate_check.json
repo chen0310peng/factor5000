@@ -1,76 +1,76 @@
 {
- "generated_at": "2026-09-14 00:58",
+ "generated_at": "2026-09-21 00:57",
  "params_locked": {
   "W": 7,
   "ge": 0.9
  },
- "baseline_60d": 0.0,
- "current_params_60d": 0.0,
+ "baseline_60d": 0.97,
+ "current_params_60d": 0.06,
  "grid": [
   {
    "W": 3,
    "ge": 0.7,
-   "total": 0.0,
+   "total": 0.73,
    "improved": false
   },
   {
    "W": 3,
    "ge": 0.9,
-   "total": 0.0,
-   "improved": false
+   "total": 1.26,
+   "improved": true
   },
   {
    "W": 3,
    "ge": 1.1,
-   "total": 0.0,
-   "improved": false
+   "total": 1.17,
+   "improved": true
   },
   {
    "W": 5,
    "ge": 0.7,
-   "total": 0.0,
+   "total": 0.1,
    "improved": false
   },
   {
    "W": 5,
    "ge": 0.9,
-   "total": 0.0,
+   "total": 0.06,
    "improved": false
   },
   {
    "W": 5,
    "ge": 1.1,
-   "total": 0.0,
+   "total": 0.27,
    "improved": false
   },
   {
    "W": 7,
    "ge": 0.7,
-   "total": 0.0,
+   "total": -0.41,
    "improved": false
   },
   {
    "W": 7,
    "ge": 0.9,
-   "total": 0.0,
+   "total": 0.06,
    "improved": false
   },
   {
    "W": 7,
    "ge": 1.1,
-   "total": 0.0,
+   "total": 0.14,
    "improved": false
   },
   {
    "W": 10,
    "ge": 0.7,
-   "total": 0.0,
+   "total": -0.63,
    "improved": false
   },
   {
    "W": 10,
    "ge": 0.9,
-   "total": 0.0,
+   "total": -0.12,
    "improved": false
   },
   {
@@ -128,8 +128,16 @@
    "current_params": 0.0,
    "current_improved": false,
    "grid_improved": 0
+  },
+  {
+   "week": "2026-09-21",
+   "pool": "2026-09-21 00:42",
+   "baseline": 0.97,
+   "current_params": 0.06,
+   "current_improved": false,
+   "grid_improved": 2
   }
  ],
- "review_needed": false,
+ "review_needed": true,
  "note": "只监控不自动改参数；连续3周未改善才标记review_needed，由人工复核"
 }
