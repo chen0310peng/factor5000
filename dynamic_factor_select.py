@@ -481,10 +481,29 @@ def main():
           f"mid={sum(1 for r in results if r['conf']=='mid')}, "
           f"low={sum(1 for r in results if r['conf']=='low')})", flush=True)
 
-    # ===== 超短线动态池：全库 15m/5m 短周期因子按 30分钟方法独立筛选 =====
-    sc_results = []
+    # ===== 超短线动态池：15m/5m 短周期因子 + 长周期可算因子的 15m 变体（2026-09-21 扩容） =====
+    # 背景：原生超短线因子 1000 个全部因缺 tick/订单簿/逐笔数据源不可算（factors.db computable=0），
+    # 候选只能靠日内/超跌里 per_day>=96 的 536 个，30分钟持仓+万4费用+一致性闸下只剩 ~20-50 个上岗，
+    # 池子常年不满。现将 K 线可算的长周期因子（per_day<=48，即 30m/1h/4h/8h/1d）生成 15m 变体
+    # 纳入同一套选拔闸（夏普/胜率/近期方向一致性/OKX双源验证全都不变），基数扩至 ~2000+。
+    # 依赖资金费率/持仓量/时段的因子不做变体（语义与周期绑定，硬搬会失真）。
+    SC_EXCL = ("fund", "funding", "oi_", "open_interest", "TODZ", "时段")
+    sc_cands, seen_sc = [], set()
     for fid, cat, name, formula, tf, pd_ in rows:
-        if pd_ < 96: continue
+        if pd_ >= 96 and (fid, tf) not in seen_sc:
+            seen_sc.add((fid, tf))
+            sc_cands.append((fid, name, formula, tf, pd_))
+    n_native = len(sc_cands)
+    for fid, cat, name, formula, tf, pd_ in rows:
+        if pd_ > 48: continue                                # 只给 ≤30m 以上周期的因子做 15m 变体
+        if any(k in formula for k in SC_EXCL): continue      # 周期绑定型数据跳过
+        vid = f"{fid}_SC15"
+        if vid in seen_sc: continue
+        seen_sc.add(vid)
+        sc_cands.append((vid, f"{name}·15m变体", formula, "15m", 96))
+    print(f"超短线候选: 原生短周期 {n_native} + 15m变体 {len(sc_cands)-n_native} = {len(sc_cands)}", flush=True)
+    sc_results = []
+    for fid, name, formula, tf, pd_ in sc_cands:
         hz = max(1, pd_//48)
         r = analyze(fid, "超短线", name, formula, tf, pd_, hz)
         if not r: continue
