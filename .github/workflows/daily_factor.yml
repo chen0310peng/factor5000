@@ -27,7 +27,7 @@ jobs:
 
       - name: run backtest
         run: python dynamic_factor_select.py --refresh
-        timeout-minutes: 55
+        timeout-minutes: 120   # 2026-09-21 超短线候选扩容（15m变体）后分析量约1.6倍
 
       - name: push result
         id: push
