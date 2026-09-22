@@ -69,6 +69,12 @@ GB_ARM_ATR       = 1.5     # 回撤保护启动门槛（回测定案：0.5太敏
 SC_PULLBACK_ON     = True
 SC_PULLBACK_SHADOW = True    # 影子模式：只记录 🔮 事件不真开仓（与止盈止损影子一起攒对照数据）
 
+# —— 双向权限与连亏保护（2026-09-22 用户定案：三模式双向开仓，因子定方向，不许连亏） ——
+SC_TREND_FILTER    = "weaken"  # 单边市逆势单：block=硬拦截 / weaken=降权放行（更强信号+半仓）
+SC_CT_MIN          = 2.0       # 逆势单信号强度下限（顺势单仍 1.2）
+SC_CT_SIZE         = 0.5       # 逆势单仓位倍率
+SYM_STREAK_BLOCK   = 3         # 同币种连续止损≥3次 → 超短线/日内暂停开新仓2小时（波段≥4次停开）
+
 # 防御层灵敏度（与网页 standard 档一致）
 DEFTH = dict(nr7=0.14, fundZ=2.0, pinZ=2.5, pinVol=1.5, taker=0.03,
              crush=0.40, shift=0.25, corr=0.50, oi=-0.02)
@@ -735,6 +741,26 @@ def close_trade(cur, last, P, reason):
 def new_trade_id(trades):
     return (trades[-1]["id"]+1) if trades else 1
 
+def sym_consec_stops(sym, trades):
+    """同币种最近连续止损次数（跨模式合并计算，2026-09-22 防连亏）"""
+    n = 0
+    for t in reversed(trades):
+        if t["sym"] != sym or t.get("pnl") is None: continue
+        if t.get("reason") == "触发止损": n += 1
+        else: break
+    return n
+
+def sym_streak_blocked(sym, state, trades, threshold, events, hours=2, mode=""):
+    """连亏熔断：同币种连续止损≥threshold → 暂停开新仓 hours 小时（只在触发时记录一次）"""
+    pause = state.setdefault("sym_pause", {})
+    if now_ms() < pause.get(sym, 0): return True
+    n = sym_consec_stops(sym, trades)
+    if n >= threshold:
+        pause[sym] = now_ms()+hours*3600000
+        events.append(f'⏸ {sym} {mode}连续{n}次止损，暂停开新仓{hours}小时（跨模式连亏熔断）')
+        return True
+    return False
+
 # ===================== 结构化止盈止损辅助（2026-09-21 阶段1/2） =====================
 def struct_snap(ohlc, price):
     """从引擎的周期数据dict构造结构快照；数据不足或模块缺失返回 None"""
@@ -840,6 +866,10 @@ def trade_engine(sym, sig, state, gate, DYNC, events, snap=None):
                 else: break
             half_guard = consec_sl >= 2
             if half_guard: target /= 2
+            # 2026-09-22 波段连亏熔断：连续4次止损 → 停止开新仓，等趋势明朗
+            if consec_sl >= 4:
+                events.append(f'⏸ {sym} 波段连续{consec_sl}次止损，停止开新仓，等趋势明朗（连亏熔断）')
+                return None
             if target < 1: return None   # 凯利上限≈0 不开僵尸单
             # —— 结构化止损/止盈（2026-09-21）：结构位锚定 + 止盈对齐反向结构区 ——
             stop0, tps, risk_scale, s_note, tp_note = P-d*1.5*A, None, 1.0, "", ""
@@ -994,6 +1024,9 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events, snap=None):
         pause_until = state.get("intra_pause_until", 0)
         flip_cd = state.setdefault("intra_flip_cd", {}).get(sym, 0)
         if now_ms() < pause_until or now_ms() < flip_cd or gate["blocked"] or intra_gate["blocked"]:
+            return None
+        # 2026-09-22 跨模式连亏熔断：同币种连续止损≥3次 → 暂停开新仓2小时
+        if zone != "FLAT" and sym_streak_blocked(sym, state, trades, SYM_STREAK_BLOCK, events, mode="日内"):
             return None
         # 2026-09-16 修复：开仓窗口排除 UTC 0 点小时（该小时同时是"日界强平"窗口，
         # 云端24h运行后暴露——08:45北京开的单08:56就被日界强平，来回空转+邮件轰炸）
@@ -1259,11 +1292,16 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
     if cur is None:
         dir0 = 1 if zone == "LONG" else -1
         pause_until = state.setdefault("scalp_pause", {}).get(sym, 0)
-        if zone != "FLAT" and ss["trending"] and dir0 != ss["trendDir"]:
+        # 单边市逆势单（2026-09-22 改降权制）：信号≥2.0 且半仓可开，否则拦截
+        ct = zone != "FLAT" and ss["trending"] and dir0 != ss["trendDir"]
+        if ct and (SC_TREND_FILTER == "block" or abs(S) < SC_CT_MIN):
             events.append(f'🚫 {sym} 超短线{"多" if dir0 > 0 else "空"}信号被趋势过滤器拦截：'
-                          f'4h 单边{"多" if ss["trendDir"] > 0 else "空"}市（{ss["tStr"]:+.1f}×ATR），逆势均值回复单禁止开仓')
+                          f'4h 单边{"多" if ss["trendDir"] > 0 else "空"}市（{ss["tStr"]:+.1f}×ATR），'
+                          f'逆势单需信号强度≥{SC_CT_MIN}（当前{abs(S):.1f}）+半仓')
         elif now_ms() < pause_until:
             pass   # 同币种连续2次止损后的60分钟冷静期
+        elif zone != "FLAT" and sym_streak_blocked(sym, state, trades, SYM_STREAK_BLOCK, events, mode="超短线"):
+            pass   # 跨模式连亏熔断中
         elif zone != "FLAT" and not gate["blocked"] and not sc_gate["blocked"]:
             cg = chase_check(state, "SC", sym, dir0, P, A, ss["hi"], ss["lo"], 0.6)
             if not cg["pass"]:
@@ -1272,6 +1310,10 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                               f'{"回落至" if dir0 > 0 else "反弹至"} ${cg["waitLv"]:,.1f} {"下方" if dir0 > 0 else "上方"}自动开第一手')
             else:
                 f_size, a_size = FIRST*gate["sizeMult"], ADD*gate["sizeMult"]
+                ct_note = ""
+                if ct:                       # 逆势单半仓
+                    f_size *= SC_CT_SIZE; a_size *= SC_CT_SIZE
+                    ct_note = "｜⚠️逆势单半仓"
                 cur = {"sym": sym, "dir": dir0, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
                        "sizePct": f_size, "addPct": a_size, "stop": P-dir0*1.5*A, "add": P-dir0*1.0*A,
                        "tp1": P+dir0*1.0*A, "tp2": P+dir0*2.0*A, "tp3": P+dir0*3.0*A,
@@ -1284,11 +1326,14 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                                "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
                 events.append(f'🔥超短线开{"多" if dir0 > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                               f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时60分钟'
+                              + ct_note
                               + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
         # —— 顺势回调通道（2026-09-22）：4h单边市里只拦逆势单却从不顺势开 → 全天零开单的根因。
         #    规则：趋势方向上，5m回踩日内VWAP/EMA20（短线超卖/超买）且最新K线企稳时开第一手 ——
         if (pos.get(sym) is None and SC_PULLBACK_ON and ss.get("trending")
-                and now_ms() >= pause_until and not gate["blocked"] and not sc_gate["blocked"]):
+                and now_ms() >= pause_until
+                and now_ms() >= state.get("sym_pause", {}).get(sym, 0)   # 尊重跨模式连亏熔断
+                and not gate["blocked"] and not sc_gate["blocked"]):
             td = ss["trendDir"]
             ema20 = ss.get("ema20") or P
             zv = ss.get("zVwap") or 0.0
