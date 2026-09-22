@@ -71,7 +71,7 @@ SC_PULLBACK_SHADOW = True    # 影子模式：只记录 🔮 事件不真开仓�
 
 # —— 双向权限与连亏保护（2026-09-22 用户定案：三模式双向开仓，因子定方向，不许连亏） ——
 SC_TREND_FILTER    = "weaken"  # 单边市逆势单：block=硬拦截 / weaken=降权放行（更强信号+半仓）
-SC_CT_MIN          = 2.0       # 逆势单信号强度下限（顺势单仍 1.2）
+SC_CT_MIN          = 2.5       # 逆势单信号强度下限（2026-09-23 用户从2.0上调；顺势单仍 1.2）
 SC_CT_SIZE         = 0.5       # 逆势单仓位倍率
 SYM_STREAK_BLOCK   = 3         # 同币种连续止损≥3次 → 超短线/日内暂停开新仓2小时（波段≥4次停开）
 
@@ -1298,6 +1298,14 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
             events.append(f'🚫 {sym} 超短线{"多" if dir0 > 0 else "空"}信号被趋势过滤器拦截：'
                           f'4h 单边{"多" if ss["trendDir"] > 0 else "空"}市（{ss["tStr"]:+.1f}×ATR），'
                           f'逆势单需信号强度≥{SC_CT_MIN}（当前{abs(S):.1f}）+半仓')
+            # 🔮影子：记录"若直接反向顺势开"的假设入场点供对照验证（不真开仓，2026-09-23）
+            # 注意：逆势信号出现=价格已顺趋势冲过头，此时反向开通常是最差顺势入场点，用数据验证
+            td = ss["trendDir"]
+            mark = f"rev{td}:{round(P/(A or 1))}"
+            if state.setdefault("sc_rev_mark", {}).get(sym) != mark:
+                state["sc_rev_mark"][sym] = mark
+                events.append(f'🔮影子 {sym} 若此刻反向顺势开{"多" if td > 0 else "空"} @ ${P:,.1f}'
+                              f'（验证用：价格已背离趋势{abs(ss["tStr"]):.1f}×ATR，对比🌊回调入场谁更优）')
         elif now_ms() < pause_until:
             pass   # 同币种连续2次止损后的60分钟冷静期
         elif zone != "FLAT" and sym_streak_blocked(sym, state, trades, SYM_STREAK_BLOCK, events, mode="超短线"):
