@@ -65,6 +65,10 @@ CHAND_K          = 1.5     # 吊灯：峰值价 - CHAND_K×ATR
 GB_TIERS         = (0.60, 0.45, 0.35, 0.25)   # 峰值<1/<2/<3/≥3×ATR 的允许回吐比例
 GB_ARM_ATR       = 1.5     # 回撤保护启动门槛（回测定案：0.5太敏感掐死小浮盈，1.5让阶梯锁利先干活）
 
+# —— 超短线顺势回调通道（2026-09-22）：根治"单边市零开单"——4h单边趋势里，5m回踩VWAP/EMA20企稳时顺趋势开仓 ——
+SC_PULLBACK_ON     = True
+SC_PULLBACK_SHADOW = True    # 影子模式：只记录 🔮 事件不真开仓（与止盈止损影子一起攒对照数据）
+
 # 防御层灵敏度（与网页 standard 档一致）
 DEFTH = dict(nr7=0.14, fundZ=2.0, pinZ=2.5, pinVol=1.5, taker=0.03,
              crush=0.40, shift=0.25, corr=0.50, oi=-0.02)
@@ -1143,6 +1147,7 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events, snap=None):
 def compute_scalp(d, dyn_sc):
     """移植 computeScalp：动态因子池为主导，静态6均值回复因子兜底；含4h趋势过滤"""
     K = d["k5"]; n = len(K)
+    o = np.array([x["o"] for x in K], float)
     c = np.array([x["c"] for x in K], float)
     h = np.array([x["h"] for x in K], float)
     l = np.array([x["l"] for x in K], float)
@@ -1210,7 +1215,9 @@ def compute_scalp(d, dyn_sc):
     t_str = (c4[-1]-ema4[-1])/(atr4v or 1e-9)
     return {"ssig": ssig, "atr5": atr5, "price": float(c[-1]), "tStr": t_str,
             "trending": abs(t_str) > 1.5, "trendDir": (1 if t_str > 0 else -1),
-            "hi": h.tolist(), "lo": l.tolist()}
+            "hi": h.tolist(), "lo": l.tolist(),
+            "zVwap": float(z_vwap), "ema20": float(ema20[-1]),
+            "lastBull": bool(c[-1] > o[-1])}
 
 def scalp_regime_gate(sym, dync):
     """移植 scalpRegimeGate：sc动态池近7日模拟（|S|≥1.2进、反向1.2或60分钟出、万4费），亏损且≥5笔→暂停"""
@@ -1278,6 +1285,40 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                 events.append(f'🔥超短线开{"多" if dir0 > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                               f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时60分钟'
                               + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+        # —— 顺势回调通道（2026-09-22）：4h单边市里只拦逆势单却从不顺势开 → 全天零开单的根因。
+        #    规则：趋势方向上，5m回踩日内VWAP/EMA20（短线超卖/超买）且最新K线企稳时开第一手 ——
+        if (pos.get(sym) is None and SC_PULLBACK_ON and ss.get("trending")
+                and now_ms() >= pause_until and not gate["blocked"] and not sc_gate["blocked"]):
+            td = ss["trendDir"]
+            ema20 = ss.get("ema20") or P
+            zv = ss.get("zVwap") or 0.0
+            pull = (td > 0 and (zv <= -0.5 or P <= ema20*1.001) and ss.get("lastBull")) or \
+                   (td < 0 and (zv >= 0.5 or P >= ema20*0.999) and not ss.get("lastBull"))
+            if pull:
+                f_size, a_size = FIRST*gate["sizeMult"], ADD*gate["sizeMult"]
+                stop0 = P-td*1.5*A
+                note = (f'4h单边{"多" if td > 0 else "空"}（{ss["tStr"]:+.1f}×ATR）+5m回踩'
+                        f'{"VWAP" if abs(zv) >= 0.5 else "EMA20"}企稳')
+                if SC_PULLBACK_SHADOW:
+                    mark = f"{td}:{round(P/(A or 1))}"      # 价格每移动1×ATR5才重新记录，防刷屏
+                    if state.setdefault("sc_shadow_mark", {}).get(sym) != mark:
+                        state["sc_shadow_mark"][sym] = mark
+                        events.append(f'🔮影子 {sym} 顺势回调{"多" if td > 0 else "空"}：{note} @ ${P:,.1f}'
+                                      f'｜本应开第一手{f_size:.1f}%，止损 ${stop0:,.1f}，限时60分钟')
+                else:
+                    cur = {"sym": sym, "dir": td, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
+                           "sizePct": f_size, "addPct": a_size, "stop": stop0, "add": P-td*1.0*A,
+                           "tp1": P+td*1.0*A, "tp2": P+td*2.0*A, "tp3": P+td*3.0*A,
+                           "addDone": False, "tp1Done": False, "tp2Done": False}
+                    pos[sym] = cur
+                    trades.append({"id": new_trade_id(trades), "sym": sym, "dir": "多" if td > 0 else "空",
+                                   "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
+                                   "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
+                                   "status": "持仓中", "exitPrice": None, "exitTime": None,
+                                   "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
+                    events.append(f'🌊超短线·顺势回调开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
+                                  f'｜{note}｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时60分钟'
+                                  + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
         return pos.get(sym)
 
     d = cur["dir"]
