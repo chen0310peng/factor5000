@@ -1,21 +1,27 @@
-name: live engine (5min)
+name: live engine (5min loop)
+
+# 2026-09-23 改造：GitHub 定时任务被平台限流，实际每3~5小时才触发一次（有运行记录为证），
+# 超短线45分钟限时/利润巡航等分钟级规则根本无法执行。
+# 改为「自接力长跑」：每次运行在 job 内循环 60 轮 × 5分钟 ≈ 5小时，结束前 dispatch 下一棒；
+# 仓库为公开仓库，Actions 分钟数免费。*/15 的 cron 保留为看门狗——接力链万一中断会被它重新拉起。
 
 on:
   schedule:
-    # 2026-09-18 起 5 分钟一巡：超短线引擎上云需要 5m 粒度（60分钟限时/追单回踩）
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'   # 看门狗：链断了由它复活
   workflow_dispatch:
 
 permissions:
   contents: write
+  actions: write             # 自接力 dispatch 需要
 
 concurrency:
   group: live_engine
-  cancel-in-progress: false
+  cancel-in-progress: false  # 同组串行：防止接力棒与看门狗并行跑重
 
 jobs:
   engine:
     runs-on: ubuntu-latest
+    timeout-minutes: 330     # 60轮×5分钟≈300分钟，留30分钟余量
     env:
       MAIL_USER: ${{ secrets.MAIL_USER }}
       MAIL_PASS: ${{ secrets.MAIL_PASS }}
@@ -30,39 +36,29 @@ jobs:
       - name: install deps
         run: pip install pandas numpy requests
 
-      - name: run live engine
-        run: python live_engine.py
-        timeout-minutes: 12
-
-      - name: push state
-        id: push
+      - name: run live engine loop (60轮 × 5分钟)
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/live_state.json
-          git diff --cached --quiet || git commit -m "live state $(date -u +'%m-%d %H:%M')"
-          # 冲突自愈：rebase 失败时以本次运行的新状态为准，重置到远端后重放提交（2026-09-20 单次失败根因）
-          for i in 1 2 3; do
-            if git pull --rebase origin main && git push; then
-              exit 0
-            fi
-            git rebase --abort 2>/dev/null || true
-            cp data/live_state.json /tmp/live_state_keep.json
-            git fetch origin main
-            git reset --hard origin/main
-            cp /tmp/live_state_keep.json data/live_state.json
+          for i in $(seq 1 60); do
+            echo "===== 第 $i 轮 $(date -u +'%m-%d %H:%M:%S') ====="
+            python live_engine.py || true
             git add data/live_state.json
-            git diff --cached --quiet || git commit -m "live state $(date -u +'%m-%d %H:%M') (conflict replay)"
-            git push && exit 0
-            sleep 5
+            git diff --cached --quiet || git commit -m "live state $(date -u +'%m-%d %H:%M')" || true
+            git pull --rebase origin main || true
+            git push || (git pull --rebase origin main && git push) || true
+            if [ -f data/live_events_pending.txt ] && [ -n "$MAIL_TO" ]; then
+              python send_mail.py || true
+              rm -f data/live_events_pending.txt
+            fi
+            sleep 275
           done
-          echo "::warning::push state failed after retries"
-          exit 1
 
-      - name: send trade email (HTML)
-        if: always() && env.MAIL_TO != '' && hashFiles('data/live_events_pending.txt') != ''
-        run: python send_mail.py
-
-      - name: clear pending events
+      - name: dispatch next run (自接力)
         if: always()
-        run: rm -f data/live_events_pending.txt
+        run: |
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/live_engine.yml/dispatches" \
+            -d '{"ref":"main"}'
