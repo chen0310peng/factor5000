@@ -229,7 +229,7 @@ def render(items, state):
 <table width="520" cellpadding="0" cellspacing="0" style="max-width:520px;width:100%;font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;">
   <tr><td style="padding:4px 6px 14px;">
     <div style="font-size:20px;font-weight:800;color:#e6f1ff;">🔔 云端引擎交易信号</div>
-    <div style="font-size:12px;color:{GRAY};margin-top:4px;">{now_s}（北京时间）· 每 15 分钟巡航 · 与本地页面同一本账</div>
+    <div style="font-size:12px;color:{GRAY};margin-top:4px;">{now_s}（北京时间）· 每 5 分钟巡航 · 与本地页面同一本账</div>
   </td></tr>
   <tr><td>{''.join(cards)}</td></tr>
   <tr><td style="padding:6px 6px 10px;"><div style="font-size:15px;font-weight:700;color:#e6f1ff;">📊 当前持仓</div></td></tr>
