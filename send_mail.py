@@ -48,6 +48,9 @@ def parse_events(lines):
         m2b = re.match(r"🔥超短线开(多|空) (\w+) 第一手([\d.]+)% @ \$([\d,.]+)(.*)", e)
         if m2b: it = {"kind": "open", "mode": "超短线", "dir": m2b.group(1), "sym": m2b.group(2),
                       "size": num(m2b.group(3)), "price": num(m2b.group(4)), "tail": m2b.group(5)}
+        m2c = re.match(r"🔁超短线·反向开(多|空) (\w+) 第一手([\d.]+)% @ \$([\d,.]+)(.*)", e)
+        if m2c: it = {"kind": "open", "mode": "超短线", "dir": m2c.group(1), "sym": m2c.group(2),
+                      "size": num(m2c.group(3)), "price": num(m2c.group(4)), "tail": m2c.group(5)}
         m3 = re.match(r"➕ (\w+) (日内|超短线)?补仓 ([\d.]+)% @ \$([\d,.]+)，均价 \$([\d,.]+)", e)
         if m3: it = {"kind": "add", "mode": m3.group(2) or "波段", "sym": m3.group(1),
                      "size": num(m3.group(3)), "price": num(m3.group(4)), "avg": num(m3.group(5))}
