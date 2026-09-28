@@ -87,6 +87,13 @@ SC_STALL_MIN  = 10      # 盈利停滞观察窗（分钟）
 SC_STALL_STEP = 0.2     # "明显利润"阈值：浮盈峰值需再涨0.2×ATR5才重置计时
 SC_HOLD_MIN   = 60      # 超短线限时（2026-09-28 用户定案改回60分钟：9-18~27二十五笔回测 60>45 约+0.8pp）
 
+# —— 反向单（2026-09-28 用户定案：可以开，但严格拦截把握低的） ——
+# 逆势信号被趋势过滤器拦截时：把握高（4h趋势强度≥REV_TSTR_MIN×ATR）→ 顺趋势反向开，半仓+过追单检查；
+# 把握低 → 严格只拦不开，继续记 🔮影子 供对照
+REV_OPEN_ON   = True
+REV_TSTR_MIN  = 2.5     # 把握高门槛：4h 趋势强度（×ATR）
+REV_SIZE      = 0.5     # 反向单仓位倍率（半仓）
+
 # 防御层灵敏度（与网页 standard 档一致）
 DEFTH = dict(nr7=0.14, fundZ=2.0, pinZ=2.5, pinVol=1.5, taker=0.03,
              crush=0.40, shift=0.25, corr=0.50, oi=-0.02)
@@ -1302,14 +1309,41 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
             events.append(f'🚫 {sym} 超短线{"多" if dir0 > 0 else "空"}信号被趋势过滤器拦截：'
                           f'4h 单边{"多" if ss["trendDir"] > 0 else "空"}市（{ss["tStr"]:+.1f}×ATR），'
                           f'逆势单需信号强度≥{SC_CT_MIN}（当前{abs(S):.1f}）+半仓')
-            # 🔮影子：记录"若直接反向顺势开"的假设入场点供对照验证（不真开仓，2026-09-23）
-            # 注意：逆势信号出现=价格已顺趋势冲过头，此时反向开通常是最差顺势入场点，用数据验证
+            # 🔁 反向单（2026-09-28 用户定案：可以开，但严格拦截把握低的）：
+            #    把握高（趋势≥REV_TSTR_MIN×ATR 且过连亏/闸门/追单检查）→ 顺趋势反向开，半仓；
+            #    把握低 → 严格只拦不开，记 🔮影子 供对照
             td = ss["trendDir"]
-            mark = f"rev{td}:{round(P/(A or 1))}"
-            if state.setdefault("sc_rev_mark", {}).get(sym) != mark:
-                state["sc_rev_mark"][sym] = mark
-                events.append(f'🔮影子 {sym} 若此刻反向顺势开{"多" if td > 0 else "空"} @ ${P:,.1f}'
-                              f'（验证用：价格已背离趋势{abs(ss["tStr"]):.1f}×ATR，对比🌊回调入场谁更优）')
+            rev_ok = (REV_OPEN_ON and abs(ss["tStr"]) >= REV_TSTR_MIN
+                      and not gate["blocked"] and not sc_gate["blocked"]
+                      and now_ms() >= pause_until
+                      and not sym_streak_blocked(sym, state, trades, SC_STREAK_N, events, hours=SC_STREAK_H, mode="超短线"))
+            if rev_ok:
+                cg2 = chase_check(state, "SC", sym, td, P, A, ss["hi"], ss["lo"], 0.6)
+                if cg2["pass"]:
+                    f_size, a_size = FIRST*gate["sizeMult"]*REV_SIZE, ADD*gate["sizeMult"]*REV_SIZE
+                    cur = {"sym": sym, "dir": td, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
+                           "sizePct": f_size, "addPct": a_size, "stop": P-td*1.5*A, "add": P-td*1.0*A,
+                           "tp1": P+td*1.0*A, "tp2": P+td*2.0*A, "tp3": P+td*3.0*A,
+                           "addDone": False, "tp1Done": False, "tp2Done": False,
+                           "peakMfe": 0.0, "lastImproveTs": now_ms()}   # 利润巡航评估系统跟踪字段
+                    pos[sym] = cur
+                    trades.append({"id": new_trade_id(trades), "sym": sym, "dir": "多" if td > 0 else "空",
+                                   "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
+                                   "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
+                                   "status": "持仓中", "exitPrice": None, "exitTime": None,
+                                   "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
+                    events.append(f'🔁超短线·反向开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
+                                  f'｜逆势信号被拦+强趋势{ss["tStr"]:+.1f}×ATR｜半仓｜限时{SC_HOLD_MIN}分钟'
+                                  + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+                else:
+                    events.append(f'🕐 {sym} 反向开单价位已延伸 {cg2["ext"]:.1f}×ATR5 → 不追单，'
+                                  f'{"回落至" if td > 0 else "反弹至"} ${cg2["waitLv"]:,.1f} 再评估')
+            else:
+                mark = f"rev{td}:{round(P/(A or 1))}"
+                if state.setdefault("sc_rev_mark", {}).get(sym) != mark:
+                    state["sc_rev_mark"][sym] = mark
+                    events.append(f'🔮影子 {sym} 反向单把握不足（趋势{abs(ss["tStr"]):.1f}<{REV_TSTR_MIN}×ATR），'
+                                  f'严格只拦不开；若开则是{"多" if td > 0 else "空"} @ ${P:,.1f}（对照用）')
         elif now_ms() < pause_until:
             pass   # 同币种连续2次止损后的60分钟冷静期
         elif zone != "FLAT" and sym_streak_blocked(sym, state, trades, SC_STREAK_N, events, hours=SC_STREAK_H, mode="超短线"):
