@@ -55,7 +55,7 @@ STRUCT_TP_ALIGN  = True    # 止盈位与前方反向结构区对齐（到结构
 LADDER_LOCK_ON   = True    # 阶梯锁利：浮盈≥1/2/3×ATR → 止损→成本/锁1ATR/吊灯(峰值-1.5ATR)
 TAPER_GIVEBACK   = True    # 递减回吐：峰值<1/2/3/≥3×ATR 允许回吐 60/45/35/25%（替代一刀切50%）
 STRUCT_TRAIL_ON  = True    # 结构跟随：新的同向结构位形成时止损跟上（只向盈利方向）
-STRUCT_SHADOW    = True    # 影子模式：只记录"本应如何"，不实际执行（观察期后关闭）
+STRUCT_SHADOW    = False   # 2026-09-28 用户定案转实盘：实盘9笔复盘+2.03pp、250天/近60天动量代理回测均优于旧规则
 # —— 可调参数（回测扫参与生产微调共用） ——
 STOP_MIN_ATR     = 0.8     # 结构止损最近距离（防噪声扫损）
 STOP_MAX_ATR     = 2.5     # 结构止损最远距离（超过则回退1.5×ATR经典止损）
