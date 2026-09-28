@@ -1,76 +1,76 @@
 {
- "generated_at": "2026-09-21 00:57",
+ "generated_at": "2026-09-28 05:56",
  "params_locked": {
   "W": 7,
   "ge": 0.9
  },
- "baseline_60d": 0.97,
- "current_params_60d": 0.06,
+ "baseline_60d": 0.0,
+ "current_params_60d": 0.0,
  "grid": [
   {
    "W": 3,
    "ge": 0.7,
-   "total": 0.73,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 3,
    "ge": 0.9,
-   "total": 1.26,
-   "improved": true
+   "total": 0.0,
+   "improved": false
   },
   {
    "W": 3,
    "ge": 1.1,
-   "total": 1.17,
-   "improved": true
+   "total": 0.0,
+   "improved": false
   },
   {
    "W": 5,
    "ge": 0.7,
-   "total": 0.1,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 5,
    "ge": 0.9,
-   "total": 0.06,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 5,
    "ge": 1.1,
-   "total": 0.27,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 7,
    "ge": 0.7,
-   "total": -0.41,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 7,
    "ge": 0.9,
-   "total": 0.06,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 7,
    "ge": 1.1,
-   "total": 0.14,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 10,
    "ge": 0.7,
-   "total": -0.63,
+   "total": 0.0,
    "improved": false
   },
   {
    "W": 10,
    "ge": 0.9,
-   "total": -0.12,
+   "total": 0.0,
    "improved": false
   },
   {
@@ -136,6 +136,14 @@
    "current_params": 0.06,
    "current_improved": false,
    "grid_improved": 2
+  },
+  {
+   "week": "2026-09-28",
+   "pool": "2026-09-28 05:37",
+   "baseline": 0.0,
+   "current_params": 0.0,
+   "current_improved": false,
+   "grid_improved": 0
   }
  ],
  "review_needed": true,
