@@ -117,11 +117,17 @@ def positions_overview(state):
     return out
 
 def ledger_stats(trades):
-    closed = [t for t in trades if t.get("pnl") is not None]
+    # 2026-09-28 修复：realized 本身就是权益%单位（仓位%×价格变动），之前 ×100 显示放大100倍；
+    # 并对齐本地页面口径：排除自愈平仓僵尸单、旧记录无 realized 时回退 pnl×sizePct/100
+    closed = [t for t in trades if t.get("pnl") is not None and t.get("reason") != "仓位异常自愈平仓"]
     if not closed: return None
     wins = sum(1 for t in closed if t["pnl"] > 0)
-    total_r = sum(t.get("realized") or 0 for t in closed)
-    return {"n": len(closed), "win": wins / len(closed) * 100, "realized": total_r * 100}
+    def _r(t):
+        if t.get("realized") is not None: return t["realized"]
+        try: return float(t.get("sizePct") or 0) * t["pnl"] / 100
+        except (TypeError, ValueError): return 0.0
+    total_r = sum(_r(t) for t in closed)
+    return {"n": len(closed), "win": wins / len(closed) * 100, "realized": total_r}
 
 # ================= HTML 渲染 =================
 def kv_table(rows):
