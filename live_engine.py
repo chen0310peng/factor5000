@@ -704,6 +704,12 @@ def intra_regime_gate(sym, d, DYNC):
     return {"blocked": pnl < 0 and trades >= 5, "pnl": pnl, "trades": trades}
 
 # ===================== 追单保护（移植 armUpdate / chaseCheck） =====================
+def gated_log(state, key, events, msg, hours=4):
+    """静默拦截可见性（2026-09-30）：同一拦截原因每 hours 小时最多记一条事件，防刷屏"""
+    lg = state.setdefault("gate_log", {})
+    if now_ms()-lg.get(key, 0) > hours*3600000:
+        lg[key] = now_ms(); events.append(msg)
+
 def arm_update(state, mode, sym, zone, dir_, P, has_pos):
     arm = state.setdefault("arm", {})
     key, zkey = f"{mode}:{sym}", f"{mode}:{sym}_z"
@@ -720,9 +726,9 @@ def chase_check(state, mode, sym, dir_, P, A, highs, lows, max_ext=None):
     if not A: return {"pass": True}
     th = max_ext or 1.0
     rec = state.get("arm", {}).get(f"{mode}:{sym}")
-    ref, proxy = None, False
+    ref, proxy, arm_ts = None, False, None
     if rec and rec.get("dir") == dir_:
-        ref = rec["price"]
+        ref = rec["price"]; arm_ts = rec.get("ts")
     elif highs and lows and len(highs) >= 3 and len(lows) >= 3:
         ref = max(highs[-3:]) if dir_ < 0 else min(lows[-3:])
         proxy = True
@@ -730,7 +736,8 @@ def chase_check(state, mode, sym, dir_, P, A, highs, lows, max_ext=None):
     ext = (ref-P)/A if dir_ < 0 else (P-ref)/A
     if ext <= th: return {"pass": True, "ext": ext}
     wait_lv = ref-th*A if dir_ < 0 else ref+th*A
-    return {"pass": False, "ext": ext, "waitLv": wait_lv, "ref": ref, "proxy": proxy, "th": th}
+    age_h = (now_ms()-arm_ts)/3600000 if arm_ts else None   # 锚龄：挂多久了（2026-09-30 可见性）
+    return {"pass": False, "ext": ext, "waitLv": wait_lv, "ref": ref, "proxy": proxy, "th": th, "age_h": age_h}
 
 # ===================== 账本与仓位工具 =====================
 def norm_pos(cur):
@@ -877,8 +884,9 @@ def trade_engine(sym, sig, state, gate, DYNC, events, snap=None):
             d = 1 if zone == "LONG" else -1
             cg = chase_check(state, "SW", sym, d, P, A, sig["hi"], sig["lo"])
             if not cg["pass"]:
+                age = f'·锚{cg["age_h"]/24:.1f}天前' if cg.get("age_h") else ""
                 events.append(f'🕐 {sym} 波段{"多" if d > 0 else "空"}信号已走出 {cg["ext"]:.1f}×ATR'
-                              f'（参考{"近3日极值" if cg.get("proxy") else "信号触发价"} ${cg["ref"]:,.1f}）'
+                              f'（参考{"近3日极值" if cg.get("proxy") else "信号触发价"} ${cg["ref"]:,.1f}{age}）'
                               f'→ 不追单，{"回落至" if d > 0 else "反弹至"} ${cg["waitLv"]:,.1f} '
                               f'{"下方" if d > 0 else "上方"}自动开第一手')
                 return None
@@ -887,7 +895,12 @@ def trade_engine(sym, sig, state, gate, DYNC, events, snap=None):
             # 2026-09-23 波段连亏保护（用户定案）：连续2次止损 → 暂停开新仓12小时
             if sym_streak_blocked(sym, state, trades, SW_STREAK_N, events, hours=SW_STREAK_H, mode="波段"):
                 return None
-            if target < 1: return None   # 凯利上限≈0 不开僵尸单
+            if target < 1:
+                gated_log(state, f"sw_kelly0|{sym}", events,
+                          f'📉 {sym} 波段{"多" if d > 0 else "空"}信号达标（finalPos {sig["finalPos"]:+.2f}）但凯利仓位≈0'
+                          f'（静态halfKelly {sig["halfKelly"]:.3f}，动态封顶 {k_cap:.1f}%）→ 不开仓；'
+                          f'波段因子近期模拟盘亏损，转正后自动放行')
+                return None   # 凯利上限≈0 不开僵尸单
             # —— 结构化止损/止盈（2026-09-21）：结构位锚定 + 止盈对齐反向结构区 ——
             stop0, tps, risk_scale, s_note, tp_note = P-d*1.5*A, None, 1.0, "", ""
             if STRUCT_ON and snap:
@@ -921,6 +934,9 @@ def trade_engine(sym, sig, state, gate, DYNC, events, snap=None):
                           f'｜止损 ${cur["stop"]:,.1f}｜止盈 {cur["tp1"]:,.0f}/{cur["tp2"]:,.0f}/{cur["tp3"]:,.0f}'
                           + s_note + tp_note
                           + ('｜🛡 高波动态：仓位减半' if gate["sizeMult"] < 1 else ''))
+        elif zone != "FLAT":
+            gated_log(state, f"sw_gate|{sym}", events,
+                      f'🔒 {sym} 波段{"多" if zone == "LONG" else "空"}信号达标但防御/宏观/时段闸门关闭 → 不开仓')
         return cur
 
     # —— 持仓管理 ——
@@ -1039,7 +1055,14 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events, snap=None):
     if not cur:
         pause_until = state.get("intra_pause_until", 0)
         flip_cd = state.setdefault("intra_flip_cd", {}).get(sym, 0)
-        if now_ms() < pause_until or now_ms() < flip_cd or gate["blocked"] or intra_gate["blocked"]:
+        if now_ms() < pause_until or now_ms() < flip_cd or gate["blocked"]:
+            return None
+        if intra_gate["blocked"]:
+            if zone != "FLAT":   # 有信号但被日内闸门拦住 → 可见性日志（2026-09-30）
+                pnl, nt = intra_gate.get("pnl"), intra_gate.get("trades")
+                gated_log(state, f"id_gate|{sym}", events,
+                          f'🔒 {sym} 日内{"多" if zone == "LONG" else "空"}信号 {abs(S):.2f} 被日内闸门拦截：'
+                          f'日内因子近7日模拟 {nt} 笔盈亏 {pnl*100:+.2f}% → 不开仓，模拟盘转正后自动放行')
             return None
         # 2026-09-23 日内连亏保护（用户定案）：同币种日内连续止损3次 → 暂停开新仓6小时
         if zone != "FLAT" and sym_streak_blocked(sym, state, trades, ID_STREAK_N, events, hours=ID_STREAK_H, mode="日内"):
@@ -1050,7 +1073,8 @@ def trade_engine_intra(sym, isig, state, gate, intra_gate, events, snap=None):
             d = 1 if zone == "LONG" else -1
             cg = chase_check(state, "ID", sym, d, P, A, isig["hi"], isig["lo"])
             if not cg["pass"]:
-                events.append(f'🕐 {sym} 日内{"多" if d > 0 else "空"}信号已走出 {cg["ext"]:.1f}×ATR4h'
+                age = f'（锚{cg["age_h"]:.0f}小时前）' if cg.get("age_h") else ""
+                events.append(f'🕐 {sym} 日内{"多" if d > 0 else "空"}信号已走出 {cg["ext"]:.1f}×ATR4h{age}'
                               f' → 不追单，{"回落至" if d > 0 else "反弹至"} ${cg["waitLv"]:,.1f} '
                               f'{"下方" if d > 0 else "上方"}自动开第一手')
                 return None
@@ -1363,11 +1387,21 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
             pass   # 同币种连续2次止损后的60分钟冷静期
         elif zone != "FLAT" and sym_streak_blocked(sym, state, trades, SC_STREAK_N, events, hours=SC_STREAK_H, mode="超短线"):
             pass   # 超短线连亏3次保护中（暂停2小时）
+        elif zone != "FLAT" and (gate["blocked"] or sc_gate["blocked"]):
+            # 闸门关闭静默拦截 → 可见性日志（2026-09-30）
+            if sc_gate["blocked"]:
+                pnl, nt = sc_gate.get("pnl"), sc_gate.get("trades")
+                detail = (f'超短因子近7日模拟 {nt} 笔盈亏 {pnl*100:+.2f}%' if pnl is not None else '超短闸门关闭')
+            else:
+                detail = '防御/宏观/时段闸门关闭'
+            gated_log(state, f"sc_gate|{sym}", events,
+                      f'🔒 {sym} 超短线{"多" if dir0 > 0 else "空"}信号 {abs(S):.2f} 被闸门拦截：{detail} → 不开仓，放行条件恢复后自动开仓')
         elif zone != "FLAT" and not gate["blocked"] and not sc_gate["blocked"]:
             cg = chase_check(state, "SC", sym, dir0, P, A, ss["hi"], ss["lo"], 0.6)
             if not cg["pass"]:
+                age = f'（锚{cg["age_h"]:.1f}小时前）' if cg.get("age_h") else ""
                 events.append(f'🕐 {sym} 超短线{"多" if dir0 > 0 else "空"}信号已走出 {cg["ext"]:.1f}×ATR5'
-                              f'（参考{"近3根5m极值" if cg["proxy"] else "信号触发价"} ${cg["ref"]:,.1f}）→ 不追单，'
+                              f'（参考{"近3根5m极值" if cg["proxy"] else "信号触发价"} ${cg["ref"]:,.1f}{age}）→ 不追单，'
                               f'{"回落至" if dir0 > 0 else "反弹至"} ${cg["waitLv"]:,.1f} {"下方" if dir0 > 0 else "上方"}自动开第一手')
             else:
                 f_size, a_size = FIRST*gate["sizeMult"], ADD*gate["sizeMult"]
