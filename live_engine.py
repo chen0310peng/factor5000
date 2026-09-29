@@ -94,6 +94,11 @@ REV_OPEN_ON   = True
 REV_TSTR_MIN  = 2.5     # 把握高门槛：4h 趋势强度（×ATR）
 REV_SIZE      = 0.5     # 反向单仓位倍率（半仓）
 
+# —— 止损后再入场升门槛（2026-09-30 回测定案：12天重放 总盈亏-0.6pp噪声内、盈亏比1.08→1.14、盈利因子2.29→2.58） ——
+# 超短线止损后 SC_REENTRY_H 小时内同方向再开仓，信号门槛 1.2 → SC_REENTRY_TH（专防治损后复仇式连环开仓）
+SC_REENTRY_H  = 2
+SC_REENTRY_TH = 1.618
+
 # 防御层灵敏度（与网页 standard 档一致）
 DEFTH = dict(nr7=0.14, fundZ=2.0, pinZ=2.5, pinVol=1.5, taker=0.03,
              crush=0.40, shift=0.25, corr=0.50, oi=-0.02)
@@ -1303,6 +1308,16 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
     if cur is None:
         dir0 = 1 if zone == "LONG" else -1
         pause_until = state.setdefault("scalp_pause", {}).get(sym, 0)
+        # 止损后2小时内同方向再开仓 → 信号门槛升至1.618（2026-09-30 回测定案：防治损后复仇式连环开仓）
+        re_key = f"{sym}|{dir0}"
+        last_stop_ts = state.get("sc_last_stop", {}).get(re_key, 0)
+        if zone != "FLAT" and now_ms()-last_stop_ts < SC_REENTRY_H*3600000 and abs(S) < SC_REENTRY_TH:
+            lg = state.setdefault("sc_reentry_log", {})
+            if lg.get(re_key) != last_stop_ts:      # 每个止损回合只记一次，防刷屏
+                lg[re_key] = last_stop_ts
+                events.append(f'🚧 {sym} 超短线{"多" if dir0 > 0 else "空"}信号{abs(S):.1f}未达再入场门槛{SC_REENTRY_TH}'
+                              f'（该方向{SC_REENTRY_H}小时内刚止损，防复仇式连环开仓）')
+            zone = "FLAT"
         # 单边市逆势单（2026-09-22 改降权制）：信号≥2.0 且半仓可开，否则拦截
         ct = zone != "FLAT" and ss["trending"] and dir0 != ss["trendDir"]
         if ct and (SC_TREND_FILTER == "block" or abs(S) < SC_CT_MIN):
@@ -1442,7 +1457,8 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
         pnl = close_trade(cur, last, P, reason)
         pos[sym] = None
         events.append(f"🏁 {sym} 超短线平仓 @ ${P:,.1f}（{reason}，{pnl*100:+.2f}%）")
-        if reason == "触发止损":   # 同币种连续2次止损 → 暂停60分钟
+        if reason == "触发止损":   # 记录本方向止损时间（止损后2h内同方向再开仓需信号≥SC_REENTRY_TH）
+            state.setdefault("sc_last_stop", {})[f"{sym}|{d}"] = now_ms()
             consec = 0
             for t in reversed(trades):
                 if t.get("mode") != "超短线" or t["sym"] != sym or t.get("pnl") is None: continue
