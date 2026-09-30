@@ -783,12 +783,19 @@ def sym_consec_stops(sym, trades, mode=None):
     return n
 
 def sym_streak_blocked(sym, state, trades, threshold, events, hours=2, mode=""):
-    """连亏熔断：同币种同模式连续止损≥threshold → 暂停开新仓 hours 小时（只在触发时记录一次）"""
+    """连亏熔断：同币种同模式连续止损≥threshold → 暂停开新仓 hours 小时（只在触发时记录一次）
+    2026-09-30 修永久锁死bug：暂停到期后若连亏数没有增长（没有新止损），必须放行——
+    否则暂停期开不了仓→连亏永远断不了→每次信号来都续期→永久锁死（9-30 超短线全天零开单实证）。
+    用户规则本意：暂停N小时冷静后恢复交易；恢复后若再止损（连亏数+1）才重新暂停。"""
     key = f"{mode}|{sym}"
     pause = state.setdefault("sym_pause", {})
     if now_ms() < pause.get(key, 0): return True
     n = sym_consec_stops(sym, trades, mode or None)
-    if n >= threshold:
+    rec = state.setdefault("sym_pause_n", {})
+    if key not in rec and pause.get(key):   # 迁移：修复前已设置的旧暂停视为已覆盖当前连亏，避免再白停一轮
+        rec[key] = n
+    if n >= threshold and n > rec.get(key, 0):
+        rec[key] = n
         pause[key] = now_ms()+hours*3600000
         events.append(f'⏸ {sym} {mode}连续{n}次止损，暂停开新仓{hours}小时（连亏保护）')
         return True
