@@ -782,6 +782,28 @@ def sym_consec_stops(sym, trades, mode=None):
         else: break
     return n
 
+def scalp_dir_streak(sym, dir_, trades):
+    """超短线同方向连续止损次数（2026-10-01 单向熔断用）：另一方向的交易不打断计数"""
+    n = 0
+    for t in reversed(trades):
+        if t["sym"] != sym or t.get("mode") != "超短线" or t.get("pnl") is None: continue
+        tdir = 1 if t.get("dir") == "多" else -1
+        if tdir != dir_: continue
+        if t.get("reason") == "触发止损": n += 1
+        else: break
+    return n
+
+def scalp_dir_fused(sym, dir_, state, trades, last_stop_ts, n=2, hours=4):
+    """单向熔断（2026-10-01 回测定案：净亏-24.9→-11.6%）：同方向连续n次止损且距上次止损<hours小时 → 该方向禁开"""
+    return (last_stop_ts and now_ms()-last_stop_ts < hours*3600000
+            and scalp_dir_streak(sym, dir_, trades) >= n)
+
+def scalp_day_stops(sym, trades):
+    """超短线当日（北京日）累计止损次数（全日熔断用）"""
+    today = bj_str()[:10]
+    return sum(1 for t in trades if t["sym"] == sym and t.get("mode") == "超短线"
+               and t.get("reason") == "触发止损" and (t.get("exitTime") or "")[:10] == today)
+
 def sym_streak_blocked(sym, state, trades, threshold, events, hours=2, mode=""):
     """连亏熔断：同币种同模式连续止损≥threshold → 暂停开新仓 hours 小时（只在触发时记录一次）
     2026-09-30 修永久锁死bug：暂停到期后若连亏数没有增长（没有新止损），必须放行——
@@ -1349,6 +1371,15 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                 events.append(f'🚧 {sym} 超短线{"多" if dir0 > 0 else "空"}信号{abs(S):.1f}未达再入场门槛{SC_REENTRY_TH}'
                               f'（该方向{SC_REENTRY_H}小时内刚止损，防复仇式连环开仓）')
             zone = "FLAT"
+        # 单向熔断 + 当日止损全日熔断（2026-10-01 回测定案：净亏 -24.9→-11.6%，专治单边被同一方向反复止损）
+        if zone != "FLAT" and scalp_dir_fused(sym, dir0, state, trades, last_stop_ts):
+            gated_log(state, f"sc_dfuse|{re_key}", events,
+                      f'🧯 {sym} 超短线{"多" if dir0 > 0 else "空"}方向连续止损≥2次，该方向熔断4小时中（反方向不受影响）', hours=2)
+            zone = "FLAT"
+        if zone != "FLAT" and scalp_day_stops(sym, trades) >= 4:
+            gated_log(state, f"sc_dayfuse|{sym}", events,
+                      f'🧯 {sym} 超短线当日已累计4次止损，今日停止开新仓，明天再战', hours=6)
+            zone = "FLAT"
         # 单边市逆势单（2026-09-22 改降权制）：信号≥2.0 且半仓可开，否则拦截
         ct = zone != "FLAT" and ss["trending"] and dir0 != ss["trendDir"]
         if ct and (SC_TREND_FILTER == "block" or abs(S) < SC_CT_MIN):
@@ -1438,6 +1469,9 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                 and now_ms() >= state.get("sym_pause", {}).get(f"超短线|{sym}", 0)   # 尊重超短线连亏保护
                 and not gate["blocked"] and not sc_gate["blocked"]):
             td = ss["trendDir"]
+            if scalp_dir_fused(sym, td, state, trades, state.get("sc_last_stop", {}).get(f"{sym}|{td}", 0)) \
+                    or scalp_day_stops(sym, trades) >= 4:
+                return pos.get(sym)   # 回调通道同样尊重单向/全日熔断（2026-10-01）
             ema20 = ss.get("ema20") or P
             zv = ss.get("zVwap") or 0.0
             pull = (td > 0 and (zv <= -0.5 or P <= ema20*1.001) and ss.get("lastBull")) or \
