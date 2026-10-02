@@ -1347,6 +1347,90 @@ def scalp_regime_gate(sym, dync):
     if pos_d != 0: pnl += pos_d*(cc[-1]/entry-1)-0.0004
     return {"blocked": pnl < 0 and trades >= 5, "pnl": pnl, "trades": trades}
 
+# ===================== 挂单入场影子（2026-10-02 L2方案，用户批"开干"） =====================
+# 影子规则：实盘超短每开一单，影子以信号价挂限价（30分钟不成交撤单），止损2.5×ATR5、
+# 止盈=止损距离×1/2/3R三档各平50%+保本锁、限时45分钟；费率按腿：挂单0.02%/市价0.05%。
+# 只记录🔮事件与 sc_mshadow.done，绝不影响实盘。对照3天后评估是否转正式。
+SC_MAKER_SHADOW = True
+SC_MS_WAIT_MS   = 30*60000
+SC_MS_STOP_A    = 2.5
+SC_MS_HOLD_MS   = 45*60000
+FEE_MAKER, FEE_TAKER = 0.02, 0.05   # % 单边
+
+def mshadow_place(state, sym, d, px, A, real_id):
+    if not SC_MAKER_SHADOW: return
+    sh = state.setdefault("sc_mshadow", {"pending": [], "active": [], "done": []})
+    if len(sh["pending"]) >= 20: return
+    sh["pending"].append({"sym": sym, "dir": d, "px": px, "A": A,
+                          "placedTs": now_ms(), "realId": real_id})
+
+def _mshadow_finish(sh, a, exit_px, reason, ts, events):
+    d = a["dir"]
+    a["realized"] += a["size"]*((exit_px/a["entry"]-1)*d*100)
+    a["fee"] += a["size"]*(FEE_MAKER if reason.startswith("止盈") else FEE_TAKER)
+    net = a["realized"] - a["fee"]
+    sh["done"].append({"sym": a["sym"], "dir": d, "entry": a["entry"], "exit": exit_px,
+                       "realId": a.get("realId"), "reason": reason, "net": round(net, 4),
+                       "fillTs": a["fillTs"], "exitTs": ts})
+    sh["done"] = sh["done"][-200:]
+    events.append(f'🔮挂单影子 {a["sym"]} {"多" if d>0 else "空"} {reason} @ ${exit_px:,.1f}'
+                  f'｜影子净盈亏 {net:+.3f}%（对照实盘#{a.get("realId")}）')
+    sh["active"].remove(a)
+
+def mshadow_update(sym, k5, state, events):
+    """每个引擎tick用5m K线推进挂单影子：成交检测→持仓管理（同根K线止损优先，保守口径）"""
+    if not SC_MAKER_SHADOW: return
+    sh = state.setdefault("sc_mshadow", {"pending": [], "active": [], "done": []})
+    now = now_ms()
+    for p in list(sh["pending"]):
+        if p["sym"] != sym: continue
+        fill_ts = None; expired = now - p["placedTs"] > SC_MS_WAIT_MS + 10*60000
+        for b in k5:
+            if b["t"] <= p["placedTs"]: continue
+            if b["t"] - p["placedTs"] > SC_MS_WAIT_MS: expired = True; break
+            if (p["dir"] > 0 and b["l"] <= p["px"]) or (p["dir"] < 0 and b["h"] >= p["px"]):
+                fill_ts = b["t"]; break
+        if fill_ts:
+            d = p["dir"]; sd = SC_MS_STOP_A*p["A"]
+            sh["active"].append({"sym": sym, "dir": d, "entry": p["px"], "A": p["A"],
+                                 "fillTs": fill_ts, "realId": p["realId"], "stop": p["px"]-d*sd,
+                                 "tp1": p["px"]+d*sd, "tp2": p["px"]+d*2*sd, "tp3": p["px"]+d*3*sd,
+                                 "size": 1.0, "realized": 0.0, "fee": FEE_MAKER,
+                                 "tp1Done": False, "tp2Done": False, "lastBarTs": fill_ts})
+            events.append(f'🔮挂单影子 {sym} {"多" if d>0 else "空"} 限价 ${p["px"]:,.1f} 已成交'
+                          f'｜影子止损 ${p["px"]-d*sd:,.1f}（2.5A）止盈1/2/3R｜对照实盘#{p["realId"]}')
+            sh["pending"].remove(p)
+        elif expired:
+            sh["pending"].remove(p)
+            sh["done"].append({"sym": sym, "dir": p["dir"], "entry": p["px"], "exit": None,
+                               "realId": p["realId"], "reason": "撤单未成交", "net": 0.0,
+                               "fillTs": None, "exitTs": now})
+            events.append(f'🔮挂单影子 {sym} {"多" if p["dir"]>0 else "空"} 限价 ${p["px"]:,.1f} '
+                          f'30分钟未成交撤单（实盘#{p["realId"]}市价成交，成交率对照记1漏单）')
+    for a in list(sh["active"]):
+        if a["sym"] != sym: continue
+        d = a["dir"]
+        for b in k5:
+            if b["t"] <= a["lastBarTs"]: continue
+            a["lastBarTs"] = b["t"]
+            hit_sl = (b["l"] <= a["stop"]) if d > 0 else (b["h"] >= a["stop"])
+            hit_tp3 = (b["h"] >= a["tp3"]) if d > 0 else (b["l"] <= a["tp3"])
+            if hit_sl:                                   # 保守：同根K线止损优先
+                _mshadow_finish(sh, a, a["stop"], "止损", b["t"], events); break
+            if hit_tp3:
+                _mshadow_finish(sh, a, a["tp3"], "止盈3", b["t"], events); break
+            if b["t"] - a["fillTs"] >= SC_MS_HOLD_MS:
+                _mshadow_finish(sh, a, b["c"], "限时45m", b["t"], events); break
+            for tp_key, tp_lv in (("tp1Done", a["tp1"]), ("tp2Done", a["tp2"])):
+                if not a[tp_key] and ((b["h"] >= tp_lv) if d > 0 else (b["l"] <= tp_lv)):
+                    frac = a["size"]*0.5
+                    a["realized"] += frac*((tp_lv/a["entry"]-1)*d*100)
+                    a["fee"] += frac*FEE_MAKER
+                    a["size"] -= frac; a[tp_key] = True
+                    if tp_key == "tp1Done":              # 保本锁
+                        lk = a["entry"]+d*0.001*a["entry"]
+                        a["stop"] = max(a["stop"], lk) if d > 0 else min(a["stop"], lk)
+
 def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
     """移植 tradeEngineScalp：第一手10%+跌1×ATR5补7%，止损-1.5×ATR5，三档止盈+1/+2/+3×ATR5，限时45分钟（2026-09-23 起），利润巡航评估系统护航"""
     pos = state.setdefault("positions_scalp", {})
@@ -1412,6 +1496,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                     events.append(f'🔁超短线·反向开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                   f'｜逆势信号被拦+强趋势{ss["tStr"]:+.1f}×ATR｜半仓｜限时{SC_HOLD_MIN}分钟'
                                   + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+                    mshadow_place(state, sym, td, P, A, trades[-1]["id"])
                 else:
                     events.append(f'🕐 {sym} 反向开单价位已延伸 {cg2["ext"]:.1f}×ATR5 → 不追单，'
                                   f'{"回落至" if td > 0 else "反弹至"} ${cg2["waitLv"]:,.1f} 再评估')
@@ -1462,6 +1547,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                               f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时{SC_HOLD_MIN}分钟'
                               + ct_note
                               + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+                mshadow_place(state, sym, dir0, P, A, trades[-1]["id"])
         # —— 顺势回调通道（2026-09-22）：4h单边市里只拦逆势单却从不顺势开 → 全天零开单的根因。
         #    规则：趋势方向上，5m回踩日内VWAP/EMA20（短线超卖/超买）且最新K线企稳时开第一手 ——
         if (pos.get(sym) is None and SC_PULLBACK_ON and ss.get("trending")
@@ -1660,6 +1746,7 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
             dyn_sc = (DYNC.get(k, {}).get("sc") or {}).get("score") if DYNC else None
             ssig = compute_scalp(bn[k], dyn_sc)
             trade_engine_scalp(k, ssig, state, gate, sc_gate, DEFG.get(k), events)
+            mshadow_update(k, bn[k].get("k5", []), state, events)
             print(f"{k} 超短线: sig={ssig['ssig']:+.2f} 持仓={'有' if state['positions_scalp'].get(k) else '无'}"
                   f" 闸门={'关' if sc_gate['blocked'] else '开'}", flush=True)
         except Exception as e:
