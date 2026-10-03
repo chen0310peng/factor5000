@@ -1349,12 +1349,16 @@ def scalp_regime_gate(sym, dync):
 
 # ===================== 挂单入场影子（2026-10-02 L2方案，用户批"开干"） =====================
 # 影子规则：实盘超短每开一单，影子以信号价挂限价（30分钟不成交撤单），止损2.5×ATR5、
-# 止盈=止损距离×1/2/3R三档各平50%+保本锁、限时45分钟；费率按腿：挂单0.02%/市价0.05%。
-# 只记录🔮事件与 sc_mshadow.done，绝不影响实盘。对照3天后评估是否转正式。
+# 止盈=止损距离×1/2/3R三档各平50%+保本锁；费率按腿：挂单0.02%/市价0.05%。
+# 2026-10-04 加双轨道（用户批"加"）：同一成交拆 L2(固定限时45分钟) 与 FREE(巡航主导：
+# 浮盈>0.1%后10分钟无进展平仓，硬顶240分钟) 两条影子，周日复盘三向对照。
+# 只记录🔮事件与 sc_mshadow.done，绝不影响实盘。
 SC_MAKER_SHADOW = True
 SC_MS_WAIT_MS   = 30*60000
 SC_MS_STOP_A    = 2.5
 SC_MS_HOLD_MS   = 45*60000
+SC_MS_FREE_CAP_MS = 240*60000
+SC_MS_CRUISE_MS = 10*60000
 FEE_MAKER, FEE_TAKER = 0.02, 0.05   # % 单边
 
 def mshadow_place(state, sym, d, px, A, real_id):
@@ -1369,11 +1373,12 @@ def _mshadow_finish(sh, a, exit_px, reason, ts, events):
     a["realized"] += a["size"]*((exit_px/a["entry"]-1)*d*100)
     a["fee"] += a["size"]*(FEE_MAKER if reason.startswith("止盈") else FEE_TAKER)
     net = a["realized"] - a["fee"]
+    mode = a.get("mode", "L2")
     sh["done"].append({"sym": a["sym"], "dir": d, "entry": a["entry"], "exit": exit_px,
                        "realId": a.get("realId"), "reason": reason, "net": round(net, 4),
-                       "fillTs": a["fillTs"], "exitTs": ts})
-    sh["done"] = sh["done"][-200:]
-    events.append(f'🔮挂单影子 {a["sym"]} {"多" if d>0 else "空"} {reason} @ ${exit_px:,.1f}'
+                       "mode": mode, "fillTs": a["fillTs"], "exitTs": ts})
+    sh["done"] = sh["done"][-400:]
+    events.append(f'🔮挂单影子[{mode}] {a["sym"]} {"多" if d>0 else "空"} {reason} @ ${exit_px:,.1f}'
                   f'｜影子净盈亏 {net:+.3f}%（对照实盘#{a.get("realId")}）')
     sh["active"].remove(a)
 
@@ -1392,13 +1397,15 @@ def mshadow_update(sym, k5, state, events):
                 fill_ts = b["t"]; break
         if fill_ts:
             d = p["dir"]; sd = SC_MS_STOP_A*p["A"]
-            sh["active"].append({"sym": sym, "dir": d, "entry": p["px"], "A": p["A"],
-                                 "fillTs": fill_ts, "realId": p["realId"], "stop": p["px"]-d*sd,
-                                 "tp1": p["px"]+d*sd, "tp2": p["px"]+d*2*sd, "tp3": p["px"]+d*3*sd,
-                                 "size": 1.0, "realized": 0.0, "fee": FEE_MAKER,
-                                 "tp1Done": False, "tp2Done": False, "lastBarTs": fill_ts})
+            for mode in ("L2", "FREE"):          # 双轨道：同一成交拆两条影子对照
+                sh["active"].append({"sym": sym, "dir": d, "entry": p["px"], "A": p["A"],
+                                     "fillTs": fill_ts, "realId": p["realId"], "stop": p["px"]-d*sd,
+                                     "tp1": p["px"]+d*sd, "tp2": p["px"]+d*2*sd, "tp3": p["px"]+d*3*sd,
+                                     "size": 1.0, "realized": 0.0, "fee": FEE_MAKER,
+                                     "tp1Done": False, "tp2Done": False, "lastBarTs": fill_ts,
+                                     "mode": mode, "peakMfe": 0.0, "lastImpTs": fill_ts})
             events.append(f'🔮挂单影子 {sym} {"多" if d>0 else "空"} 限价 ${p["px"]:,.1f} 已成交'
-                          f'｜影子止损 ${p["px"]-d*sd:,.1f}（2.5A）止盈1/2/3R｜对照实盘#{p["realId"]}')
+                          f'｜影子止损 ${p["px"]-d*sd:,.1f}（2.5A）止盈1/2/3R｜双轨道L2/FREE｜对照实盘#{p["realId"]}')
             sh["pending"].remove(p)
         elif expired:
             sh["pending"].remove(p)
@@ -1419,8 +1426,18 @@ def mshadow_update(sym, k5, state, events):
                 _mshadow_finish(sh, a, a["stop"], "止损", b["t"], events); break
             if hit_tp3:
                 _mshadow_finish(sh, a, a["tp3"], "止盈3", b["t"], events); break
-            if b["t"] - a["fillTs"] >= SC_MS_HOLD_MS:
-                _mshadow_finish(sh, a, b["c"], "限时45m", b["t"], events); break
+            # 进展跟踪（FREE巡航用）：收盘价口径，与回测一致
+            mfe_c = (b["c"]/a["entry"]-1)*d
+            if mfe_c > a.get("peakMfe", 0.0) + 0.2*a["A"]/a["entry"]:
+                a["peakMfe"] = mfe_c; a["lastImpTs"] = b["t"]
+            if a.get("mode") == "FREE":
+                if b["t"] - a["fillTs"] >= SC_MS_FREE_CAP_MS:
+                    _mshadow_finish(sh, a, b["c"], "硬顶240m", b["t"], events); break
+                if mfe_c > 0.001 and b["t"] - a["lastImpTs"] > SC_MS_CRUISE_MS:
+                    _mshadow_finish(sh, a, b["c"], "巡航停滞", b["t"], events); break
+            else:
+                if b["t"] - a["fillTs"] >= SC_MS_HOLD_MS:
+                    _mshadow_finish(sh, a, b["c"], "限时45m", b["t"], events); break
             for tp_key, tp_lv in (("tp1Done", a["tp1"]), ("tp2Done", a["tp2"])):
                 if not a[tp_key] and ((b["h"] >= tp_lv) if d > 0 else (b["l"] <= tp_lv)):
                     frac = a["size"]*0.5
