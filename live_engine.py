@@ -1448,6 +1448,85 @@ def mshadow_update(sym, k5, state, events):
                         lk = a["entry"]+d*0.001*a["entry"]
                         a["stop"] = max(a["stop"], lk) if d > 0 else min(a["stop"], lk)
 
+# ===================== 日内强趋势影子（2026-10-07，用户批"有用就加"） =====================
+# 回测依据（bt2_trendproto+单边门）：|tStr|≥2.0 且同向开单的顺势策略全期 ETH PF3.85/BTC PF1.39，
+# 但7-8月震荡段亏损 → 只记影子不开仓，等下一个单边段用实盘数据定案。
+# 规则复刻回测：止损1.5×ATR4h，止盈1/2/3×ATR4h（平1/3→成本锁、再减半→tp1锁），
+# UTC0日界强平，24h强平，tStr反向≥1.0平，12h未达tp1止损移成本。吃单0.1%计费。
+ID_TSHADOW_ON = True
+ID_TS_TH = 2.0
+
+def _h4_tstr(h4):
+    c = h4["c"]; hh = h4["h"]; ll = h4["l"]
+    e = c[0]
+    for p in c: e = p*2/21 + e*19/21
+    tr = [hh[0]-ll[0]] + [max(hh[i]-ll[i], abs(hh[i]-c[i-1]), abs(ll[i]-c[i-1])) for i in range(1, len(c))]
+    atr4 = mean(tr[-14:])
+    return (c[-1]-e)/(atr4 or 1e-9), atr4
+
+def _idt_finish(sh, a, exit_px, reason, ts, events):
+    d = a["dir"]
+    a["realized"] += a["size"]*((exit_px/a["entry"]-1)*d*100)
+    a["fee"] += a["size"]*0.05
+    net = a["realized"] - a["fee"]
+    sh["done"].append({"sym": a["sym"], "dir": d, "entry": a["entry"], "exit": exit_px,
+                       "reason": reason, "net": round(net, 4), "entryTs": a["entryTs"], "exitTs": ts})
+    sh["done"] = sh["done"][-100:]
+    events.append(f'🔮趋势影子[ID] {a["sym"]} {"多" if d>0 else "空"} {reason} @ ${exit_px:,.1f}'
+                  f'｜影子净盈亏 {net:+.3f}%（tStr入场{a["tStrIn"]:+.1f}）')
+    sh["active"].pop(a["sym"], None)
+
+def idtshadow_update(sym, h4, state, events):
+    """每tick用4h K线推进强趋势影子：|tStr|>=2.0开（每币同时只持一笔），新4h棒推进管理"""
+    if not ID_TSHADOW_ON or not h4 or not h4.get("t"): return
+    sh = state.setdefault("id_tshadow", {"active": {}, "done": []})
+    tstr, atr4 = _h4_tstr(h4)
+    bars = [{"t": h4["t"][i], "h": h4["h"][i], "l": h4["l"][i], "c": h4["c"][i]}
+            for i in range(len(h4["t"]))]
+    last_c = h4["c"][-1]
+    a = sh["active"].get(sym)
+    if a is None:
+        if abs(tstr) >= ID_TS_TH:
+            d = 1 if tstr > 0 else -1
+            sh["active"][sym] = {"sym": sym, "dir": d, "entry": last_c, "entryTs": h4["t"][-1],
+                                 "stop": last_c-d*1.5*atr4,
+                                 "tp1": last_c+d*atr4, "tp2": last_c+d*2*atr4, "tp3": last_c+d*3*atr4,
+                                 "size": 1.0, "realized": -0.05, "fee": 0.0,   # 入场腿费已扣
+                                 "tp1Done": False, "tp2Done": False,
+                                 "lastBarTs": h4["t"][-1], "tStrIn": tstr}
+            events.append(f'🔮趋势影子[ID] {sym} 强单边{"多" if d>0 else "空"}（tStr {tstr:+.1f}≥{ID_TS_TH}）'
+                          f'假设开仓 @ ${last_c:,.1f}｜止损 ${last_c-d*1.5*atr4:,.1f}｜止盈1/2/3×ATR4h')
+        return
+    d = a["dir"]
+    # 反向强信号平仓（tick级，用当前tStr）
+    if (1 if tstr > 0 else -1 if tstr < 0 else 0) == -d and abs(tstr) >= 1.0:
+        _idt_finish(sh, a, last_c, "tStr反转", now_ms(), events); return
+    for b in bars:
+        if b["t"] <= a["lastBarTs"]: continue
+        a["lastBarTs"] = b["t"]
+        hit_sl = (b["l"] <= a["stop"]) if d > 0 else (b["h"] >= a["stop"])
+        hit_tp3 = (b["h"] >= a["tp3"]) if d > 0 else (b["l"] <= a["tp3"])
+        if hit_sl:
+            _idt_finish(sh, a, a["stop"], "止损", b["t"], events); return
+        if hit_tp3:
+            _idt_finish(sh, a, a["tp3"], "止盈3", b["t"], events); return
+        if b["t"] - a["entryTs"] >= 24*3600000:
+            _idt_finish(sh, a, b["c"], "24h强平", b["t"], events); return
+        if time.gmtime(b["t"]/1000).tm_hour == 0:
+            _idt_finish(sh, a, b["c"], "UTC日界强平", b["t"], events); return
+        if not a["tp1Done"] and ((b["h"] >= a["tp1"]) if d > 0 else (b["l"] <= a["tp1"])):
+            a["realized"] += (a["size"]/3)*((a["tp1"]/a["entry"]-1)*d*100)
+            a["fee"] += (a["size"]/3)*0.05
+            a["size"] *= 2/3; a["tp1Done"] = True
+            if (a["entry"]-a["stop"])*d > 0: a["stop"] = a["entry"]
+        elif a["tp1Done"] and not a["tp2Done"] and ((b["h"] >= a["tp2"]) if d > 0 else (b["l"] <= a["tp2"])):
+            a["realized"] += (a["size"]/2)*((a["tp2"]/a["entry"]-1)*d*100)
+            a["fee"] += (a["size"]/2)*0.05
+            a["size"] /= 2; a["tp2Done"] = True
+            if (a["tp1"]-a["stop"])*d > 0: a["stop"] = a["tp1"]
+        if b["t"] - a["entryTs"] >= 12*3600000 and not a["tp1Done"] and (a["entry"]-a["stop"])*d > 0:
+            a["stop"] = a["entry"]
+
 def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
     """移植 tradeEngineScalp：第一手10%+跌1×ATR5补7%，止损-1.5×ATR5，三档止盈+1/+2/+3×ATR5，限时45分钟（2026-09-23 起），利润巡航评估系统护航"""
     pos = state.setdefault("positions_scalp", {})
@@ -1753,6 +1832,7 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
             isig = compute_intraday(bn[k], k, state)
             snap1 = struct_snap(bn[k].get("k1h"), isig["price"])
             trade_engine_intra(k, isig, state, gate, igate, events, snap=snap1)
+            idtshadow_update(k, bn[k].get("h4"), state, events)
             print(f"{k} 日内: sig={isig['sig']:+.2f} 持仓={'有' if state['positions_intra'].get(k) else '无'}"
                   f" 闸门={'关' if igate['blocked'] else '开'}", flush=True)
         except Exception as e:
