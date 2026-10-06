@@ -3609,6 +3609,10 @@
     {
      "t": 1791327115907,
      "v": 0.4162473040977714
+    },
+    {
+     "t": 1791327458500,
+     "v": 0.4162473040977714
     }
    ]
   },
@@ -3625,13 +3629,17 @@
     {
      "t": 1791327115938,
      "v": 0.18691588785046728
+    },
+    {
+     "t": 1791327458530,
+     "v": 0.18691588785046728
     }
    ]
   }
  },
  "sema": {
-  "BTC": -0.5140811589567638,
-  "ETH": -1.4082857892379415
+  "BTC": -0.5617143415157115,
+  "ETH": -1.3056497581313646
  },
  "freeze": {
   "BTC": 1791286218291,
@@ -3647,33 +3655,33 @@
  "intra_pause_until": 1789929687961,
  "signals": {
   "BTC": {
-   "price": 85538.9,
+   "price": 85509.7,
    "S": -3,
    "dynSW": -3,
    "finalPos": -1.2631878574890902,
    "atr": 2043.2999999999997,
    "risk": 23,
-   "intraSig": -0.5140811589567638,
+   "intraSig": -0.5617143415157115,
    "swLive": 97,
    "idLive": 30,
    "scalpSig": -3,
    "scLive": 96
   },
   "ETH": {
-   "price": 2696.15,
-   "S": -2.829783486302523,
+   "price": 2696.07,
+   "S": -2.8299840472797992,
    "dynSW": -3,
    "finalPos": -1.3261956847938343,
    "atr": 73.3864285714285,
    "risk": 23,
-   "intraSig": -1.4082857892379415,
+   "intraSig": -1.3056497581313646,
    "swLive": 97,
    "idLive": 30,
    "scalpSig": -3,
    "scLive": 96
   }
  },
- "updated_at": "2026-10-07 06:51:56",
+ "updated_at": "2026-10-07 06:57:39",
  "positions_scalp": {
   "BTC": {
    "sym": "BTC",
@@ -3691,8 +3699,8 @@
    "addDone": false,
    "tp1Done": false,
    "tp2Done": false,
-   "peakMfe": 0.0,
-   "lastImproveTs": 1791326771189,
+   "peakMfe": 0.00026773417387060405,
+   "lastImproveTs": 1791327458917,
    "atrEntry": 47.928571428579744
   },
   "ETH": {
@@ -3773,10 +3781,10 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1791327000000,
+    "lastBarTs": 1791327300000,
     "mode": "L2",
-    "peakMfe": 0.0,
-    "lastImpTs": 1791327000000
+    "peakMfe": 0.00026773417387060405,
+    "lastImpTs": 1791327300000
    },
    {
     "sym": "BTC",
@@ -3794,10 +3802,10 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1791327000000,
+    "lastBarTs": 1791327300000,
     "mode": "FREE",
-    "peakMfe": 0.0,
-    "lastImpTs": 1791327000000
+    "peakMfe": 0.00026773417387060405,
+    "lastImpTs": 1791327300000
    },
    {
     "sym": "ETH",
@@ -3815,7 +3823,7 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1791327000000,
+    "lastBarTs": 1791327300000,
     "mode": "L2",
     "peakMfe": 0.0,
     "lastImpTs": 1791327000000
@@ -3836,7 +3844,7 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1791327000000,
+    "lastBarTs": 1791327300000,
     "mode": "FREE",
     "peakMfe": 0.0,
     "lastImpTs": 1791327000000
