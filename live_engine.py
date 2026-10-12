@@ -67,7 +67,7 @@ GB_ARM_ATR       = 1.5     # 回撤保护启动门槛（回测定案：0.5太敏
 
 # —— 超短线顺势回调通道（2026-09-22）：根治"单边市零开单"——4h单边趋势里，5m回踩VWAP/EMA20企稳时顺趋势开仓 ——
 SC_PULLBACK_ON     = True
-SC_PULLBACK_SHADOW = True    # 影子模式：只记录 🔮 事件不真开仓（与止盈止损影子一起攒对照数据）
+SC_PULLBACK_SHADOW = True    # 影子模式：不真开仓；2026-10-12 起升级为完整持仓跟踪（sc_pbshadow.done 记录净盈亏）
 
 # —— 双向权限与连亏保护（2026-09-22 用户定案：三模式双向开仓，因子定方向，不许连亏） ——
 SC_TREND_FILTER    = "weaken"  # 单边市逆势单：block=硬拦截 / weaken=降权放行（更强信号+半仓）
@@ -1354,6 +1354,7 @@ def scalp_regime_gate(sym, dync):
 # 浮盈>0.1%后10分钟无进展平仓，硬顶240分钟) 两条影子，周日复盘三向对照。
 # 只记录🔮事件与 sc_mshadow.done，绝不影响实盘。
 SC_MAKER_SHADOW = True
+SC_MS_L2_ON     = False   # 2026-10-12 用户拍板关停：L2轨道55对样本稳定跑输实盘-3.35%（PF0.91），只留FREE巡航轨道继续观察
 SC_MS_WAIT_MS   = 30*60000
 SC_MS_STOP_A    = 2.5
 SC_MS_HOLD_MS   = 45*60000
@@ -1397,7 +1398,7 @@ def mshadow_update(sym, k5, state, events):
                 fill_ts = b["t"]; break
         if fill_ts:
             d = p["dir"]; sd = SC_MS_STOP_A*p["A"]
-            for mode in ("L2", "FREE"):          # 双轨道：同一成交拆两条影子对照
+            for mode in (("L2", "FREE") if SC_MS_L2_ON else ("FREE",)):   # L2已关停，默认只剩FREE轨道
                 sh["active"].append({"sym": sym, "dir": d, "entry": p["px"], "A": p["A"],
                                      "fillTs": fill_ts, "realId": p["realId"], "stop": p["px"]-d*sd,
                                      "tp1": p["px"]+d*sd, "tp2": p["px"]+d*2*sd, "tp3": p["px"]+d*3*sd,
@@ -1405,7 +1406,8 @@ def mshadow_update(sym, k5, state, events):
                                      "tp1Done": False, "tp2Done": False, "lastBarTs": fill_ts,
                                      "mode": mode, "peakMfe": 0.0, "lastImpTs": fill_ts})
             events.append(f'🔮挂单影子 {sym} {"多" if d>0 else "空"} 限价 ${p["px"]:,.1f} 已成交'
-                          f'｜影子止损 ${p["px"]-d*sd:,.1f}（2.5A）止盈1/2/3R｜双轨道L2/FREE｜对照实盘#{p["realId"]}')
+                          f'｜影子止损 ${p["px"]-d*sd:,.1f}（2.5A）止盈1/2/3R'
+                          f'｜{"双轨道L2/FREE" if SC_MS_L2_ON else "FREE巡航轨道"}｜对照实盘#{p["realId"]}')
             sh["pending"].remove(p)
         elif expired:
             sh["pending"].remove(p)
@@ -1443,6 +1445,67 @@ def mshadow_update(sym, k5, state, events):
                     frac = a["size"]*0.5
                     a["realized"] += frac*((tp_lv/a["entry"]-1)*d*100)
                     a["fee"] += frac*FEE_MAKER
+                    a["size"] -= frac; a[tp_key] = True
+                    if tp_key == "tp1Done":              # 保本锁
+                        lk = a["entry"]+d*0.001*a["entry"]
+                        a["stop"] = max(a["stop"], lk) if d > 0 else min(a["stop"], lk)
+
+# ===================== 顺势回调影子·完整持仓跟踪（2026-10-12 改造，用户批"改造"） =====================
+# 旧版只记 🔮 开仓事件不跟踪结果，每次评估都要人工拿外部K线回算。
+# 改造：信号触发即建影子仓（市价口径），每 tick 用 5m K 线推进——同根K线止损优先（保守），
+# tp1/tp2 各平50%+保本锁，tp3 清仓，限时 SC_HOLD_MIN 分钟；吃单 0.05%×双腿计费。
+# 规则与实盘超短对齐，done 净盈亏可直接对照，周日复盘不再手工回算。
+SC_PBSHADOW_ON = True
+
+def pbshadow_place(state, sym, td, px, A, tstr, events):
+    if not SC_PBSHADOW_ON: return
+    sh = state.setdefault("sc_pbshadow", {"active": [], "done": []})
+    if any(a["sym"] == sym for a in sh["active"]): return   # 同币只持一条影子仓
+    if len(sh["active"]) >= 6: return
+    sh["active"].append({"sym": sym, "dir": td, "entry": px, "A": A, "tStrIn": tstr,
+                         "entryTs": now_ms(), "stop": px-td*1.5*A,
+                         "tp1": px+td*1.0*A, "tp2": px+td*2.0*A, "tp3": px+td*3.0*A,
+                         "size": 1.0, "realized": 0.0, "fee": FEE_TAKER,
+                         "tp1Done": False, "tp2Done": False, "lastBarTs": now_ms()})
+    events.append(f'🔮回调影子 {sym} {"多" if td>0 else "空"} 建仓 @ ${px:,.1f}'
+                  f'｜趋势{tstr:+.1f}×ATR｜止损 ${px-td*1.5*A:,.1f}（1.5A）止盈1/2/3A｜限时{SC_HOLD_MIN}分钟')
+
+def _pb_finish(sh, a, exit_px, reason, ts, events):
+    d = a["dir"]
+    a["realized"] += a["size"]*((exit_px/a["entry"]-1)*d*100)
+    a["fee"] += a["size"]*FEE_TAKER
+    net = a["realized"] - a["fee"]
+    sh["done"].append({"sym": a["sym"], "dir": d, "entry": a["entry"], "exit": exit_px,
+                       "reason": reason, "net": round(net, 4), "tStrIn": a.get("tStrIn"),
+                       "entryTs": a["entryTs"], "exitTs": ts})
+    sh["done"] = sh["done"][-400:]
+    events.append(f'🔮回调影子 {a["sym"]} {"多" if d>0 else "空"} {reason} @ ${exit_px:,.1f}'
+                  f'｜影子净盈亏 {net:+.3f}%（tStr入场{(a.get("tStrIn") or 0):+.1f}）')
+    sh["active"].remove(a)
+
+def pbshadow_update(sym, k5, state, events):
+    """每 tick 用 5m K 线推进回调影子持仓（口径与挂单影子一致：同根K线止损优先）"""
+    if not SC_PBSHADOW_ON: return
+    sh = state.setdefault("sc_pbshadow", {"active": [], "done": []})
+    for a in list(sh["active"]):
+        if a["sym"] != sym: continue
+        d = a["dir"]
+        for b in k5:
+            if b["t"] <= a["lastBarTs"]: continue
+            a["lastBarTs"] = b["t"]
+            hit_sl = (b["l"] <= a["stop"]) if d > 0 else (b["h"] >= a["stop"])
+            hit_tp3 = (b["h"] >= a["tp3"]) if d > 0 else (b["l"] <= a["tp3"])
+            if hit_sl:
+                _pb_finish(sh, a, a["stop"], "止损", b["t"], events); break
+            if hit_tp3:
+                _pb_finish(sh, a, a["tp3"], "止盈3", b["t"], events); break
+            if b["t"] - a["entryTs"] >= SC_HOLD_MIN*60000:
+                _pb_finish(sh, a, b["c"], f"限时{SC_HOLD_MIN}m", b["t"], events); break
+            for tp_key, tp_lv in (("tp1Done", a["tp1"]), ("tp2Done", a["tp2"])):
+                if not a[tp_key] and ((b["h"] >= tp_lv) if d > 0 else (b["l"] <= tp_lv)):
+                    frac = a["size"]*0.5
+                    a["realized"] += frac*((tp_lv/a["entry"]-1)*d*100)
+                    a["fee"] += frac*FEE_TAKER
                     a["size"] -= frac; a[tp_key] = True
                     if tp_key == "tp1Done":              # 保本锁
                         lk = a["entry"]+d*0.001*a["entry"]
@@ -1664,11 +1727,10 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                 note = (f'4h单边{"多" if td > 0 else "空"}（{ss["tStr"]:+.1f}×ATR）+5m回踩'
                         f'{"VWAP" if abs(zv) >= 0.5 else "EMA20"}企稳')
                 if SC_PULLBACK_SHADOW:
-                    mark = f"{td}:{round(P/(A or 1))}"      # 价格每移动1×ATR5才重新记录，防刷屏
+                    mark = f"{td}:{round(P/(A or 1))}"      # 价格每移动1×ATR5才允许再开影子仓，防刷屏
                     if state.setdefault("sc_shadow_mark", {}).get(sym) != mark:
                         state["sc_shadow_mark"][sym] = mark
-                        events.append(f'🔮影子 {sym} 顺势回调{"多" if td > 0 else "空"}：{note} @ ${P:,.1f}'
-                                      f'｜本应开第一手{f_size:.1f}%，止损 ${stop0:,.1f}，限时{SC_HOLD_MIN}分钟')
+                        pbshadow_place(state, sym, td, P, A, ss["tStr"], events)   # 完整持仓跟踪（2026-10-12改造）
                 else:
                     cur = {"sym": sym, "dir": td, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
                            "sizePct": f_size, "addPct": a_size, "stop": stop0, "add": P-td*1.0*A,
@@ -1844,6 +1906,7 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
             ssig = compute_scalp(bn[k], dyn_sc)
             trade_engine_scalp(k, ssig, state, gate, sc_gate, DEFG.get(k), events)
             mshadow_update(k, bn[k].get("k5", []), state, events)
+            pbshadow_update(k, bn[k].get("k5", []), state, events)   # 回调影子持仓推进（2026-10-12）
             print(f"{k} 超短线: sig={ssig['ssig']:+.2f} 持仓={'有' if state['positions_scalp'].get(k) else '无'}"
                   f" 闸门={'关' if sc_gate['blocked'] else '开'}", flush=True)
         except Exception as e:
