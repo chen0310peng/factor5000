@@ -93,6 +93,11 @@ SC_HOLD_MIN   = 60      # 超短线限时（2026-09-28 用户定案改回60分�
 REV_OPEN_ON   = True
 REV_TSTR_MIN  = 2.5     # 把握高门槛：4h 趋势强度（×ATR）
 REV_SIZE      = 0.5     # 反向单仓位倍率（半仓）
+# ④上岗（2026-10-14 用户定案"让他上岗"）：中趋势带 [REV2_TSTR_MIN, REV_TSTR_MIN) 不再只拦不开，
+# 逆势信号被拦时顺趋势轻仓开第一手，纪律（追单/闸门/连亏/冷静期）与高门槛带完全一致
+REV2_ON       = True
+REV2_TSTR_MIN = 1.8     # 中门槛带下沿（trending 判定是 1.5，留 0.3 缓冲避开趋势萌芽噪音）
+REV2_SIZE     = 0.25    # 轻仓试单：1/4 仓（高门槛带的一半）
 
 # —— 止损后再入场升门槛（2026-09-30 回测定案：12天重放 总盈亏-0.6pp噪声内、盈亏比1.08→1.14、盈利因子2.29→2.58） ——
 # 超短线止损后 SC_REENTRY_H 小时内同方向再开仓，信号门槛 1.2 → SC_REENTRY_TH（专防治损后复仇式连环开仓）
@@ -1397,17 +1402,23 @@ def mshadow_update(sym, k5, state, events):
             if (p["dir"] > 0 and b["l"] <= p["px"]) or (p["dir"] < 0 and b["h"] >= p["px"]):
                 fill_ts = b["t"]; break
         if fill_ts:
-            d = p["dir"]; sd = SC_MS_STOP_A*p["A"]
-            for mode in (("L2", "FREE") if SC_MS_L2_ON else ("FREE",)):   # L2已关停，默认只剩FREE轨道
+            d = p["dir"]
+            for mode in (("L2", "FREE", "F2") if SC_MS_L2_ON else ("FREE", "F2")):
+                # F2 轨道（2026-10-14 用户批改造）：入场不变（挂单等回踩），离场与实盘超短完全对齐——
+                # 止损1.5A、止盈1/2/3A、限时SC_HOLD_MIN分钟。FREE 的 2.5A 远止盈够不着是跑输主因，
+                # F2 只改离场 → 隔离出"挂单入场"本身的 alpha，与 FREE 互为对照
+                sd = (1.5 if mode == "F2" else SC_MS_STOP_A)*p["A"]
+                tpu = (p["A"], p["A"]*2, p["A"]*3) if mode == "F2" else (sd, sd*2, sd*3)
+                hold = SC_MS_HOLD_MS if mode == "L2" else (SC_HOLD_MIN*60000 if mode == "F2" else SC_MS_FREE_CAP_MS)
                 sh["active"].append({"sym": sym, "dir": d, "entry": p["px"], "A": p["A"],
                                      "fillTs": fill_ts, "realId": p["realId"], "stop": p["px"]-d*sd,
-                                     "tp1": p["px"]+d*sd, "tp2": p["px"]+d*2*sd, "tp3": p["px"]+d*3*sd,
+                                     "tp1": p["px"]+d*tpu[0], "tp2": p["px"]+d*tpu[1], "tp3": p["px"]+d*tpu[2],
                                      "size": 1.0, "realized": 0.0, "fee": FEE_MAKER,
                                      "tp1Done": False, "tp2Done": False, "lastBarTs": fill_ts,
-                                     "mode": mode, "peakMfe": 0.0, "lastImpTs": fill_ts})
+                                     "mode": mode, "holdMs": hold, "cruise": mode != "L2",
+                                     "peakMfe": 0.0, "lastImpTs": fill_ts})
             events.append(f'🔮挂单影子 {sym} {"多" if d>0 else "空"} 限价 ${p["px"]:,.1f} 已成交'
-                          f'｜影子止损 ${p["px"]-d*sd:,.1f}（2.5A）止盈1/2/3R'
-                          f'｜{"双轨道L2/FREE" if SC_MS_L2_ON else "FREE巡航轨道"}｜对照实盘#{p["realId"]}')
+                          f'｜FREE(2.5A/1-3R)+F2(1.5A/1-3A,与实盘对齐)双轨道｜对照实盘#{p["realId"]}')
             sh["pending"].remove(p)
         elif expired:
             sh["pending"].remove(p)
@@ -1432,14 +1443,14 @@ def mshadow_update(sym, k5, state, events):
             mfe_c = (b["c"]/a["entry"]-1)*d
             if mfe_c > a.get("peakMfe", 0.0) + 0.2*a["A"]/a["entry"]:
                 a["peakMfe"] = mfe_c; a["lastImpTs"] = b["t"]
-            if a.get("mode") == "FREE":
-                if b["t"] - a["fillTs"] >= SC_MS_FREE_CAP_MS:
-                    _mshadow_finish(sh, a, b["c"], "硬顶240m", b["t"], events); break
-                if mfe_c > 0.001 and b["t"] - a["lastImpTs"] > SC_MS_CRUISE_MS:
-                    _mshadow_finish(sh, a, b["c"], "巡航停滞", b["t"], events); break
-            else:
-                if b["t"] - a["fillTs"] >= SC_MS_HOLD_MS:
-                    _mshadow_finish(sh, a, b["c"], "限时45m", b["t"], events); break
+            # 通用限时/巡航（2026-10-14 F2改造）：每轨道带自己的 holdMs 与 cruise 标记；
+            # 旧记录无字段时按 mode 回退（FREE→240m巡航，其余→45m限时），历史仓位不受影响
+            hold = a.get("holdMs") or (SC_MS_FREE_CAP_MS if a.get("mode") == "FREE" else SC_MS_HOLD_MS)
+            cruise = a.get("cruise", a.get("mode") == "FREE")
+            if b["t"] - a["fillTs"] >= hold:
+                _mshadow_finish(sh, a, b["c"], f"限时{int(hold/60000)}m", b["t"], events); break
+            if cruise and mfe_c > 0.001 and b["t"] - a["lastImpTs"] > SC_MS_CRUISE_MS:
+                _mshadow_finish(sh, a, b["c"], "巡航停滞", b["t"], events); break
             for tp_key, tp_lv in (("tp1Done", a["tp1"]), ("tp2Done", a["tp2"])):
                 if not a[tp_key] and ((b["h"] >= tp_lv) if d > 0 else (b["l"] <= tp_lv)):
                     frac = a["size"]*0.5
@@ -1533,7 +1544,8 @@ def _idt_finish(sh, a, exit_px, reason, ts, events):
     a["fee"] += a["size"]*0.05
     net = a["realized"] - a["fee"]
     sh["done"].append({"sym": a["sym"], "dir": d, "entry": a["entry"], "exit": exit_px,
-                       "reason": reason, "net": round(net, 4), "entryTs": a["entryTs"], "exitTs": ts})
+                       "reason": reason, "net": round(net, 4), "entryTs": a["entryTs"], "exitTs": ts,
+                       "ver": a.get("ver", 1)})
     sh["done"] = sh["done"][-100:]
     events.append(f'🔮趋势影子[ID] {a["sym"]} {"多" if d>0 else "空"} {reason} @ ${exit_px:,.1f}'
                   f'｜影子净盈亏 {net:+.3f}%（tStr入场{a["tStrIn"]:+.1f}）')
@@ -1551,12 +1563,22 @@ def idtshadow_update(sym, h4, state, events):
     if a is None:
         if abs(tstr) >= ID_TS_TH:
             d = 1 if tstr > 0 else -1
+            # v2 改造（2026-10-14 用户批）：v1 的死因是"趋势结束还连续接刀"（10-12/13 四连止损）。
+            # 两道入场健康检查：
+            #  1) 顺势棒确认：最近一根4h棒必须收在趋势方向，衰竭反转棒上不开仓；
+            #  2) 连亏冷却：同币最近2笔全亏且距今<12h → 暂停（沿用波段连亏纪律）。
+            fresh = (h4["c"][-1]-h4["c"][-2])*d > 0
+            recent2 = [r for r in sh["done"] if r["sym"] == sym][-2:]
+            cooled = (len(recent2) == 2 and all(r["net"] <= 0 for r in recent2)
+                      and now_ms()-max(r["exitTs"] for r in recent2) < 12*3600000)
+            if not fresh or cooled:
+                return
             sh["active"][sym] = {"sym": sym, "dir": d, "entry": last_c, "entryTs": h4["t"][-1],
                                  "stop": last_c-d*1.5*atr4,
                                  "tp1": last_c+d*atr4, "tp2": last_c+d*2*atr4, "tp3": last_c+d*3*atr4,
                                  "size": 1.0, "realized": -0.05, "fee": 0.0,   # 入场腿费已扣
                                  "tp1Done": False, "tp2Done": False,
-                                 "lastBarTs": h4["t"][-1], "tStrIn": tstr}
+                                 "lastBarTs": h4["t"][-1], "tStrIn": tstr, "ver": 2}
             events.append(f'🔮趋势影子[ID] {sym} 强单边{"多" if d>0 else "空"}（tStr {tstr:+.1f}≥{ID_TS_TH}）'
                           f'假设开仓 @ ${last_c:,.1f}｜止损 ${last_c-d*1.5*atr4:,.1f}｜止盈1/2/3×ATR4h')
         return
@@ -1660,11 +1682,40 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                     events.append(f'🕐 {sym} 反向开单价位已延伸 {cg2["ext"]:.1f}×ATR5 → 不追单，'
                                   f'{"回落至" if td > 0 else "反弹至"} ${cg2["waitLv"]:,.1f} 再评估')
             else:
-                mark = f"rev{td}:{round(P/(A or 1))}"
-                if state.setdefault("sc_rev_mark", {}).get(sym) != mark:
-                    state["sc_rev_mark"][sym] = mark
-                    events.append(f'🔮影子 {sym} 反向单把握不足（趋势{abs(ss["tStr"]):.1f}<{REV_TSTR_MIN}×ATR），'
-                                  f'严格只拦不开；若开则是{"多" if td > 0 else "空"} @ ${P:,.1f}（对照用）')
+                # ④上岗（2026-10-14 用户定案）：中趋势带不再只拦不开——顺势轻仓（1/4仓）开第一手，
+                # 追单/闸门/连亏/冷静期纪律与高门槛带一致；仓位减半再减半，亏损冲击可控
+                rev2_ok = (REV2_ON and abs(ss["tStr"]) >= REV2_TSTR_MIN
+                           and not gate["blocked"] and not sc_gate["blocked"]
+                           and now_ms() >= pause_until
+                           and not sym_streak_blocked(sym, state, trades, SC_STREAK_N, events, hours=SC_STREAK_H, mode="超短线"))
+                if rev2_ok:
+                    cg3 = chase_check(state, "SC", sym, td, P, A, ss["hi"], ss["lo"], 0.6)
+                    if cg3["pass"]:
+                        f_size, a_size = FIRST*gate["sizeMult"]*REV2_SIZE, ADD*gate["sizeMult"]*REV2_SIZE
+                        cur = {"sym": sym, "dir": td, "entry": P, "entryTime": bj_str(), "entryTs": now_ms(),
+                               "sizePct": f_size, "addPct": a_size, "stop": P-td*1.5*A, "add": P-td*1.0*A,
+                               "tp1": P+td*1.0*A, "tp2": P+td*2.0*A, "tp3": P+td*3.0*A,
+                               "addDone": False, "tp1Done": False, "tp2Done": False,
+                               "peakMfe": 0.0, "lastImproveTs": now_ms()}   # 利润巡航评估系统跟踪字段
+                        pos[sym] = cur
+                        trades.append({"id": new_trade_id(trades), "sym": sym, "dir": "多" if td > 0 else "空",
+                                       "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
+                                       "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
+                                       "status": "持仓中", "exitPrice": None, "exitTime": None,
+                                       "pnl": None, "reason": "", "mode": "超短线", "realized": 0, "src": "REV2"})
+                        events.append(f'🔁超短线·顺势补位开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
+                                      f'｜逆势信号被拦+中趋势{ss["tStr"]:+.1f}×ATR｜¼仓试单｜限时{SC_HOLD_MIN}分钟'
+                                      + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+                        mshadow_place(state, sym, td, P, A, trades[-1]["id"])
+                    else:
+                        events.append(f'🕐 {sym} 顺势补位价位已延伸 {cg3["ext"]:.1f}×ATR5 → 不追单，'
+                                      f'{"回落至" if td > 0 else "反弹至"} ${cg3["waitLv"]:,.1f} 再评估')
+                else:
+                    mark = f"rev{td}:{round(P/(A or 1))}"
+                    if state.setdefault("sc_rev_mark", {}).get(sym) != mark:
+                        state["sc_rev_mark"][sym] = mark
+                        events.append(f'🔮影子 {sym} 反向单把握不足（趋势{abs(ss["tStr"]):.1f}<{REV2_TSTR_MIN}×ATR），'
+                                      f'严格只拦不开；若开则是{"多" if td > 0 else "空"} @ ${P:,.1f}（对照用）')
         elif now_ms() < pause_until:
             pass   # 同币种连续2次止损后的60分钟冷静期
         elif zone != "FLAT" and sym_streak_blocked(sym, state, trades, SC_STREAK_N, events, hours=SC_STREAK_H, mode="超短线"):
