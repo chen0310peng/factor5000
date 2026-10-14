@@ -1522,6 +1522,64 @@ def pbshadow_update(sym, k5, state, events):
                         lk = a["entry"]+d*0.001*a["entry"]
                         a["stop"] = max(a["stop"], lk) if d > 0 else min(a["stop"], lk)
 
+# ===================== 日内离场影子（2026-10-14，账本分析③，用户批"开干"） =====================
+# 痛点：日内近7日7笔全部止损出场、远止盈永远够不着（PF0.68，与L2挂单影子同死因）。
+# 影子规则：日内实盘开仓即镜像建仓（不占资金不交易），止盈拉近到 1.4×止损距离一次全平
+# + 巡航（浮盈覆盖手续费后30分钟无进展离场）+ 24h强平；实盘平仓时影子同步结算。
+# done 同时记录影子净盈亏与实盘净盈亏，直接对照两种离场规则谁优。吃单往返0.1%计费。
+ID_ALT_ON = True
+
+def idalt_update(sym, k1h, state, events):
+    if not ID_ALT_ON or not k1h or not k1h.get("t"): return
+    sh = state.setdefault("id_altshadow", {"track": {}, "done": [], "lastExit": {}})
+    trades = state.get("trades", [])
+    pos = state.get("positions_intra", {}).get(sym)
+    tr = sh["track"].get(sym)
+    bars = [{"t": k1h["t"][i], "h": k1h["h"][i], "l": k1h["l"][i], "c": k1h["c"][i]}
+            for i in range(len(k1h["t"]))]
+    last_c = k1h["c"][-1]
+
+    def settle(tk, xp, reason, ts, real_net=None):
+        d = tk["dir"]
+        net = (xp/tk["entry"]-1)*d*100 - 0.10          # 吃单往返0.1%
+        sh["done"].append({"sym": sym, "dir": d, "entry": tk["entry"], "exit": xp,
+                           "reason": reason, "altNet": round(net, 4), "realNet": real_net,
+                           "entryTs": tk["entryTs"], "exitTs": ts})
+        sh["done"] = sh["done"][-200:]
+        sh["lastExit"][sym] = tk["entryTs"]            # 防止影子先离场后对同一实盘仓重复镜像
+        events.append(f'🔮日内离场影子 {sym} {"多" if d>0 else "空"} {reason} @ ${xp:,.1f}'
+                      f'｜影子净{net:+.3f}%' + (f' vs 实盘{real_net:+.3f}%' if real_net is not None else ''))
+        sh["track"].pop(sym, None)
+
+    if pos and tr is None:                              # 实盘日内开仓 → 镜像建仓
+        if sh["lastExit"].get(sym) == pos.get("entryTs"): return
+        d = pos["dir"]; e = pos["entry"]; sd = abs(e-pos["stop"])
+        if sd > 0:
+            ets = pos.get("entryTs") or now_ms()
+            sh["track"][sym] = {"dir": d, "entry": e, "stop": pos["stop"],
+                                "tp": e+d*1.4*sd, "entryTs": ets,
+                                "lastBarTs": ets, "peak": 0.0, "lastImp": ets}
+        return
+    if pos is None and tr is not None:                  # 实盘已平 → 影子同步结算 + 抓实盘净盈亏对照
+        real = next((t for t in reversed(trades)
+                     if t["sym"] == sym and t.get("mode") == "日内" and t.get("pnl") is not None
+                     and abs(t["entry"]-tr["entry"])/tr["entry"] < 0.001), None)
+        settle(tr, last_c, "实盘平仓同步", now_ms(), real["pnl"] if real else None)
+        return
+    if tr is None: return
+    d = tr["dir"]
+    for b in bars:
+        if b["t"] <= tr["lastBarTs"]: continue
+        tr["lastBarTs"] = b["t"]
+        mfe = (b["c"]/tr["entry"]-1)*d
+        if mfe > tr["peak"] + 0.0002: tr["peak"] = mfe; tr["lastImp"] = b["t"]   # 1h级别进展阈值0.02%
+        hit_sl = (b["l"] <= tr["stop"]) if d > 0 else (b["h"] >= tr["stop"])
+        hit_tp = (b["h"] >= tr["tp"]) if d > 0 else (b["l"] <= tr["tp"])
+        if hit_sl: settle(tr, tr["stop"], "止损", b["t"]); return
+        if hit_tp: settle(tr, tr["tp"], "止盈1.4R", b["t"]); return
+        if mfe > 0.001 and (b["t"]-tr["lastImp"])/60000 > 30: settle(tr, b["c"], "巡航30m", b["t"]); return
+        if (b["t"]-tr["entryTs"])/3600000 >= 24: settle(tr, b["c"], "24h强平", b["t"]); return
+
 # ===================== 日内强趋势影子（2026-10-07，用户批"有用就加"） =====================
 # 回测依据（bt2_trendproto+单边门）：|tStr|≥2.0 且同向开单的顺势策略全期 ETH PF3.85/BTC PF1.39，
 # 但7-8月震荡段亏损 → 只记影子不开仓，等下一个单边段用实盘数据定案。
@@ -1620,7 +1678,13 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
     cur = norm_pos(pos.get(sym))
     pos[sym] = cur
     th = 1.5 if (defg or {}).get("highVol") else 1.2
-    zone = "LONG" if S >= th else ("SHORT" if S <= -th else "FLAT")
+    # ① ETH 门槛上调（2026-10-14 账本分析定案）：ETH 超短近7日胜率39%/PF1.05 边际单太多（BTC PF2.41），
+    #    静态信号重放验证 1.35 档砍 27% 交易数且均亏不恶化
+    if sym == "ETH": th = max(th, 1.35)
+    # ② 多单软降权（同日定案）：4h 趋势偏空（tStr<0）时多单门槛升至 1.5——
+    #    趋势过滤器只拦 |tStr|>1.5 的单边，弱下跌区多单全灭（近7日 0/4，-0.62%）
+    th_l = max(th, 1.5) if ss.get("tStr", 0) < 0 else th
+    zone = "LONG" if S >= th_l else ("SHORT" if S <= -th else "FLAT")
     arm_update(state, "SC", sym, zone, 1 if zone == "LONG" else -1, P, cur is not None)
     FIRST, ADD = 10, 7
     if cur is None:
@@ -1673,7 +1737,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                                    "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
                                    "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
                                    "status": "持仓中", "exitPrice": None, "exitTime": None,
-                                   "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
+                                   "pnl": None, "reason": "", "mode": "超短线", "realized": 0, "sig": round(S, 2)})
                     events.append(f'🔁超短线·反向开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                   f'｜逆势信号被拦+强趋势{ss["tStr"]:+.1f}×ATR｜半仓｜限时{SC_HOLD_MIN}分钟'
                                   + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
@@ -1702,7 +1766,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                                        "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
                                        "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
                                        "status": "持仓中", "exitPrice": None, "exitTime": None,
-                                       "pnl": None, "reason": "", "mode": "超短线", "realized": 0, "src": "REV2"})
+                                       "pnl": None, "reason": "", "mode": "超短线", "realized": 0, "sig": round(S, 2), "src": "REV2"})
                         events.append(f'🔁超短线·顺势补位开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                       f'｜逆势信号被拦+中趋势{ss["tStr"]:+.1f}×ATR｜¼仓试单｜限时{SC_HOLD_MIN}分钟'
                                       + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
@@ -1752,7 +1816,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                                "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
                                "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
                                "status": "持仓中", "exitPrice": None, "exitTime": None,
-                               "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
+                               "pnl": None, "reason": "", "mode": "超短线", "realized": 0, "sig": round(S, 2)})
                 events.append(f'🔥超短线开{"多" if dir0 > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                               f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时{SC_HOLD_MIN}分钟'
                               + ct_note
@@ -1793,7 +1857,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                                    "entryTime": bj_str(), "entry": P, "sizePct": round(f_size, 1),
                                    "stop": cur["stop"], "tp1": cur["tp1"], "tp2": cur["tp2"], "tp3": cur["tp3"],
                                    "status": "持仓中", "exitPrice": None, "exitTime": None,
-                                   "pnl": None, "reason": "", "mode": "超短线", "realized": 0})
+                                   "pnl": None, "reason": "", "mode": "超短线", "realized": 0, "sig": round(S, 2)})
                     events.append(f'🌊超短线·顺势回调开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                   f'｜{note}｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时{SC_HOLD_MIN}分钟'
                                   + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
@@ -1945,6 +2009,7 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
             isig = compute_intraday(bn[k], k, state)
             snap1 = struct_snap(bn[k].get("k1h"), isig["price"])
             trade_engine_intra(k, isig, state, gate, igate, events, snap=snap1)
+            idalt_update(k, bn[k].get("k1h"), state, events)   # 日内离场影子（止盈1.4R+巡航对照）
             idtshadow_update(k, bn[k].get("h4"), state, events)
             print(f"{k} 日内: sig={isig['sig']:+.2f} 持仓={'有' if state['positions_intra'].get(k) else '无'}"
                   f" 闸门={'关' if igate['blocked'] else '开'}", flush=True)
