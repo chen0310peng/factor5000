@@ -5172,10 +5172,6 @@
    "shockPrice": 80046.4,
    "rvHist": [
     {
-     "t": 1792868150164,
-     "v": 0.30050323508267435
-    },
-    {
      "t": 1792868488820,
      "v": 0.30697340043134436
     },
@@ -5218,6 +5214,10 @@
     {
      "t": 1792871683536,
      "v": 0.30697340043134436
+    },
+    {
+     "t": 1792872019741,
+     "v": 0.30697340043134436
     }
    ]
   },
@@ -5227,10 +5227,6 @@
    "shockAmp": 6.662379843600363,
    "shockPrice": 2338.76,
    "rvHist": [
-    {
-     "t": 1792868150179,
-     "v": 0.5895039539899353
-    },
     {
      "t": 1792868488835,
      "v": 0.5902228612508986
@@ -5274,13 +5270,17 @@
     {
      "t": 1792871683556,
      "v": 0.590941768511862
+    },
+    {
+     "t": 1792872019761,
+     "v": 0.5923795830337887
     }
    ]
   }
  },
  "sema": {
-  "BTC": 0.7457040761762908,
-  "ETH": 0.6657456853727284
+  "BTC": 0.6796687924799467,
+  "ETH": 0.8203890217034109
  },
  "freeze": {
   "BTC": 1792861446145,
@@ -5296,33 +5296,33 @@
  "intra_pause_until": 1792367988646,
  "signals": {
   "BTC": {
-   "price": 80483.8,
+   "price": 80450.1,
    "S": -3,
    "dynSW": -3,
    "finalPos": -1.5,
    "atr": 2189.614285714284,
    "risk": 21,
-   "intraSig": 0.7457040761762908,
+   "intraSig": 0.6796687924799467,
    "swLive": 91,
    "idLive": 74,
    "scalpSig": -3,
    "scLive": 94
   },
   "ETH": {
-   "price": 2338.64,
+   "price": 2343.09,
    "S": -3,
    "dynSW": -3,
    "finalPos": -1.320531349468736,
    "atr": 103.99142857142861,
    "risk": 28,
-   "intraSig": 0.6657456853727284,
+   "intraSig": 0.8203890217034109,
    "swLive": 91,
    "idLive": 74,
    "scalpSig": -3,
    "scLive": 94
   }
  },
- "updated_at": "2026-10-25 03:54:44",
+ "updated_at": "2026-10-25 04:00:20",
  "positions_scalp": {
   "BTC": {
    "sym": "BTC",
@@ -5340,8 +5340,8 @@
    "addDone": false,
    "tp1Done": false,
    "tp2Done": false,
-   "peakMfe": 0.00021120373706373652,
-   "lastImproveTs": 1792871348335,
+   "peakMfe": 0.0005068889689531231,
+   "lastImproveTs": 1792872020045,
    "atrEntry": 80.7285714285681
   },
   "ETH": null
@@ -5413,7 +5413,7 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1792871400000,
+    "lastBarTs": 1792871700000,
     "mode": "FREE",
     "holdMs": 14400000,
     "cruise": true,
@@ -5436,7 +5436,7 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1792871400000,
+    "lastBarTs": 1792871700000,
     "mode": "FREE",
     "holdMs": 14400000,
     "cruise": true,
@@ -5459,12 +5459,12 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1792871400000,
+    "lastBarTs": 1792871700000,
     "mode": "FREE",
     "holdMs": 14400000,
     "cruise": true,
-    "peakMfe": 0.0,
-    "lastImpTs": 1792869900000
+    "peakMfe": 0.0005068889689531231,
+    "lastImpTs": 1792871700000
    },
    {
     "sym": "BTC",
@@ -5482,12 +5482,12 @@
     "fee": 0.02,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1792871400000,
+    "lastBarTs": 1792871700000,
     "mode": "F2",
     "holdMs": 3600000,
     "cruise": true,
-    "peakMfe": 0.0,
-    "lastImpTs": 1792869900000
+    "peakMfe": 0.0005068889689531231,
+    "lastImpTs": 1792871700000
    }
   ],
   "done": [
@@ -7620,7 +7620,7 @@
     "fee": 0.0,
     "tp1Done": false,
     "tp2Done": false,
-    "lastBarTs": 1792857600000,
+    "lastBarTs": 1792872000000,
     "tStrIn": -2.118295596171355,
     "ver": 2
    }
