@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-19 05:23",
+ "generated_at": "2026-10-26 05:21",
  "params_locked": {
   "W": 7,
   "ge": 0.9
@@ -164,6 +164,14 @@
   {
    "week": "2026-10-19",
    "pool": "2026-10-19 04:55",
+   "baseline": 0.0,
+   "current_params": 0.0,
+   "current_improved": false,
+   "grid_improved": 0
+  },
+  {
+   "week": "2026-10-26",
+   "pool": "2026-10-26 05:01",
    "baseline": 0.0,
    "current_params": 0.0,
    "current_improved": false,
