@@ -66,7 +66,9 @@ GB_TIERS         = (0.60, 0.45, 0.35, 0.25)   # 峰值<1/<2/<3/≥3×ATR 的允�
 GB_ARM_ATR       = 1.5     # 回撤保护启动门槛（回测定案：0.5太敏感掐死小浮盈，1.5让阶梯锁利先干活）
 
 # —— 超短线顺势回调通道（2026-09-22）：根治"单边市零开单"——4h单边趋势里，5m回踩VWAP/EMA20企稳时顺趋势开仓 ——
-SC_PULLBACK_ON     = True
+# 2026-10-29 关停定论：回调影子新版完整跟踪 29 笔胜率62%但净-1.58%（PF0.62），开头3连胜是趋势段假象，
+# 样本量足够，不再观察。历史数据保留在 sc_pbshadow.done 供以后复盘。
+SC_PULLBACK_ON     = False
 SC_PULLBACK_SHADOW = True    # 影子模式：不真开仓；2026-10-12 起升级为完整持仓跟踪（sc_pbshadow.done 记录净盈亏）
 
 # —— 双向权限与连亏保护（2026-09-22 用户定案：三模式双向开仓，因子定方向，不许连亏） ——
@@ -1358,7 +1360,8 @@ def scalp_regime_gate(sym, dync):
 # 2026-10-04 加双轨道（用户批"加"）：同一成交拆 L2(固定限时45分钟) 与 FREE(巡航主导：
 # 浮盈>0.1%后10分钟无进展平仓，硬顶240分钟) 两条影子，周日复盘三向对照。
 # 只记录🔮事件与 sc_mshadow.done，绝不影响实盘。
-SC_MAKER_SHADOW = True
+SC_MAKER_SHADOW = False   # 2026-10-29 关停定论：66对配对样本排序稳定 实盘(-5.22%)>F2(-7.77%)>FREE(-11.25%)，
+                          # 挂单等回踩入场方式被判死，L2/FREE/F2 三轨道全部停止记录（历史数据保留）
 SC_MS_L2_ON     = False   # 2026-10-12 用户拍板关停：L2轨道55对样本稳定跑输实盘-3.35%（PF0.91），只留FREE巡航轨道继续观察
 SC_MS_WAIT_MS   = 30*60000
 SC_MS_STOP_A    = 2.5
@@ -1466,7 +1469,7 @@ def mshadow_update(sym, k5, state, events):
 # 改造：信号触发即建影子仓（市价口径），每 tick 用 5m K 线推进——同根K线止损优先（保守），
 # tp1/tp2 各平50%+保本锁，tp3 清仓，限时 SC_HOLD_MIN 分钟；吃单 0.05%×双腿计费。
 # 规则与实盘超短对齐，done 净盈亏可直接对照，周日复盘不再手工回算。
-SC_PBSHADOW_ON = True
+SC_PBSHADOW_ON = False   # 2026-10-29 关停：29笔 PF0.62 定论淘汰
 
 def pbshadow_place(state, sym, td, px, A, tstr, events):
     if not SC_PBSHADOW_ON: return
@@ -1527,7 +1530,8 @@ def pbshadow_update(sym, k5, state, events):
 # 影子规则：日内实盘开仓即镜像建仓（不占资金不交易），止盈拉近到 1.4×止损距离一次全平
 # + 巡航（浮盈覆盖手续费后30分钟无进展离场）+ 24h强平；实盘平仓时影子同步结算。
 # done 同时记录影子净盈亏与实盘净盈亏，直接对照两种离场规则谁优。吃单往返0.1%计费。
-ID_ALT_ON = True
+ID_ALT_ON = False   # 2026-10-29 关停定论：6对配对 影子离场+0.91% vs 实盘离场+1.51%（PF3.71），
+                    # 现行日内离场规则已是最优，止盈拉近1.4R+巡航方案不再考虑
 
 def idalt_update(sym, k1h, state, events):
     if not ID_ALT_ON or not k1h or not k1h.get("t"): return
@@ -1585,7 +1589,8 @@ def idalt_update(sym, k1h, state, events):
 # 但7-8月震荡段亏损 → 只记影子不开仓，等下一个单边段用实盘数据定案。
 # 规则复刻回测：止损1.5×ATR4h，止盈1/2/3×ATR4h（平1/3→成本锁、再减半→tp1锁），
 # UTC0日界强平，24h强平，tStr反向≥1.0平，12h未达tp1止损移成本。吃单0.1%计费。
-ID_TSHADOW_ON = True
+ID_TSHADOW_ON = False   # 2026-10-29 关停定论：v1 12笔-2.28% + v2(顺势棒+连亏冷却) 7笔全灭-8.35%，
+                        # 4h顺势策略两个版本都被证伪，影子挡灾避免实盘-10.6%亏损
 ID_TS_TH = 2.0
 
 def _h4_tstr(h4):
