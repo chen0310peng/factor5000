@@ -202,6 +202,12 @@ def fetch_binance(sym):
     except Exception: oi = []
     try: oi1h = bn_get("/futures/data/openInterestHist", {"symbol": s, "period": "1h", "limit": 500})
     except Exception: oi1h = []
+    # 2026-10-29 用户要求"做单位置与实盘对齐"：现价从1h K线收盘价改为合约实时ticker，
+    # 消除 K 线收盘与盘口之间的时间差；ticker 不可达时回退 K 线收盘价
+    try:
+        now_px = float(bn_get("/fapi/v1/ticker/price", {"symbol": s})["price"])
+    except Exception:
+        now_px = float(k1h[-1][4])
     return {
         "close": [float(x[4]) for x in k], "high": [float(x[2]) for x in k],
         "low": [float(x[3]) for x in k],   "vol": [float(x[5]) for x in k],
@@ -209,7 +215,7 @@ def fetch_binance(sym):
         "t1d": [int(x[0]) for x in k],
         "fund": [{"t": int(x["fundingTime"]), "r": float(x["fundingRate"])} for x in f],
         "h1": [{"t": int(x[0]), "c": float(x[4])} for x in k1h],
-        "now": float(k1h[-1][4]),
+        "now": now_px,
         "k1h": {"t": [int(x[0]) for x in k1h], "o": [float(x[1]) for x in k1h],
                 "h": [float(x[2]) for x in k1h], "l": [float(x[3]) for x in k1h],
                 "c": [float(x[4]) for x in k1h], "v": [float(x[5]) for x in k1h],
@@ -244,6 +250,11 @@ def fetch_okx_full(sym):
     A = lambda a: [{"t": int(x[0]), "o": float(x[1]), "h": float(x[2]), "l": float(x[3]),
                     "c": float(x[4]), "v": float(x[5]), "tb": float(x[5])/2} for x in a]
     K1, K4, K15, K5 = A(k1h), A(k4h), A(k15), A(k5)
+    # 兜底路径同样用实时ticker（OKX永续最新价），保持与币安路径口径一致
+    try:
+        now_okx = float(_get(OKX, f"/api/v5/market/ticker?instId={inst}", timeout=15)["data"][0]["last"])
+    except Exception:
+        now_okx = K1[-1]["c"] if K1 else 0
     return {
         "close": [float(x[4]) for x in k], "high": [float(x[2]) for x in k],
         "low": [float(x[3]) for x in k],   "vol": [float(x[5]) for x in k],
@@ -252,7 +263,7 @@ def fetch_okx_full(sym):
         "fund": [{"t": int(x["fundingTime"]), "r": float(x["fundingRate"])}
                  for x in reversed(f.get("data") or [])],
         "h1": [{"t": x["t"], "c": x["c"]} for x in K1],
-        "now": K1[-1]["c"] if K1 else 0,
+        "now": now_okx,
         "k1h": {kk: [x[kk] for x in K1] for kk in ("t","o","h","l","c","v","tb")},
         "h4":  {kk: [x[kk] for x in K4] for kk in ("t","o","h","l","c","v","tb")},
         "k15": K15, "k5": K5,
@@ -1966,6 +1977,10 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
         try:
             bn[k] = fetch_one(k)
             print(f"{k}: ${bn[k]['now']:,.1f}（{'OKX兜底' if bn[k].get('srcOKX') else '币安'}）", flush=True)
+            if bn[k].get("srcOKX"):
+                # 2026-10-29 用户反馈"价格与实盘有出入"：兜底换所时必须明示，防止按别所价格开单
+                events.append(f"⚠️ {k} 本轮币安镜像全部不可达，使用 OKX 永续价格兜底——"
+                              f"开单参考价与币安盘口可能有出入，以你的实盘盘口为准")
         except Exception as e:
             errs.append(f"{k}: {e}")
     if not bn:
