@@ -347,6 +347,29 @@ def roll_z200(arr):
         z = ((s-m)/sd).clip(-4, 4)
     return z.values
 
+# ===================== 日内因子快速降权影子（2026-10-29，用户批"先挂影子"） =====================
+# 背景：10月日内77个因子中59个近期IC与全期反号（regime切换快），每日05:56重选有最长1天滞后。
+# 影子规则：每个15分钟tick，对日内每个因子现算近3日IC（dir调整、前向4根K线收益），
+# 反号因子当日权重立即减半 → 合成"对照分" altScore。实盘合成一分不动，
+# 只在 state["id_fastshadow"]["log"] 记录 生产分/对照分/价格，攒数据比较两条分的预测力。
+ID_FASTSHADOW_ON = True
+
+def _recent_ic(arr, c, ts, dirn, days=3, fw=4):
+    """近 days 天窗口内 dir*因子值 与 前向fw根收益 的相关系数；样本不足返回None"""
+    n = len(arr)
+    if n < 40 or n != len(c) or n != len(ts): return None
+    cutoff = ts[-1] - days*86400000
+    xs, ys = [], []
+    for i in range(n-fw):
+        if ts[i] < cutoff: continue
+        a = arr[i]
+        if not np.isfinite(a) or c[i] <= 0: continue
+        xs.append(dirn*a); ys.append(c[i+fw]/c[i]-1)
+    if len(xs) < 20: return None
+    x = np.asarray(xs); y = np.asarray(ys)
+    if x.std() < 1e-12 or y.std() < 1e-12: return None
+    return float(np.corrcoef(x, y)[0, 1])
+
 def dyn_compute_all(bn, dyn500):
     """移植 dynComputeAll：返回 {sym: {sw,id,os,sc:{score,live,total,top}, swSeries,idSeries, ns}}"""
     out = {}
@@ -392,6 +415,7 @@ def dyn_compute_all(bn, dyn500):
             pool = selected.get(cat, [])
             grid = envs["m15"] if cat == "日内" else envs["m5"] if cat == "超短线" else envs["d1"] if cat == "波段" else None
             ssum = wsum = 0.0; live = 0; top = []
+            ssum2 = wsum2 = 0.0; derated = 0          # 快速降权影子累加器（仅日内）
             acc = wacc = None
             for f in pool:
                 env = envs.get(tf_key(f.get("tf", "")))
@@ -410,6 +434,12 @@ def dyn_compute_all(bn, dyn500):
                     continue
                 contrib = f["dir"]*z*f["w"]
                 ssum += contrib; wsum += f["w"]; live += 1
+                if ID_FASTSHADOW_ON and cat == "日内":   # 影子：近3日IC反号 → 当日权重减半
+                    w2 = f["w"]
+                    ic = _recent_ic(arr, env["c"], env["t"], f["dir"])
+                    if ic is not None and ic < 0:
+                        w2 = f["w"]*0.5; derated += 1
+                    ssum2 += f["dir"]*z*w2; wsum2 += w2
                 top.append({"id": f["id"], "name": f["name"], "contrib": contrib, "z": z})
                 if grid is not None:
                     try:
@@ -423,6 +453,9 @@ def dyn_compute_all(bn, dyn500):
             top.sort(key=lambda x: -abs(x["contrib"]))
             out[k][cat_key[cat]] = {"score": clamp(ssum/wsum, -3, 3) if wsum else 0.0,
                                     "live": live, "total": len(pool), "top": top[:5]}
+            if ID_FASTSHADOW_ON and cat == "日内" and out[k].get("id"):
+                out[k]["id"]["altScore"] = clamp(ssum2/wsum2, -3, 3) if wsum2 else out[k]["id"]["score"]
+                out[k]["id"]["derated"] = derated
             if grid is not None and acc is not None:
                 with np.errstate(divide="ignore", invalid="ignore"):
                     ser = np.where(wacc > 0, np.clip(acc/np.where(wacc == 0, 1, wacc), -3, 3), np.nan)
@@ -2005,6 +2038,17 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
     except Exception as e:
         print(f"⚠️ 动态因子层异常({e})，本轮只用静态锚", flush=True)
         DYNC = {}
+    # 3b) 快速降权影子日志（2026-10-29 用户批"先挂影子上传到云端一起跑"）：
+    #     只记录 生产分/对照分/当时价，不干预任何实盘信号；攒约8天后比较两条分的前向收益预测力
+    if ID_FASTSHADOW_ON:
+        fslog = state.setdefault("id_fastshadow", {"log": []})["log"]
+        for k in bn:
+            idd = (DYNC.get(k) or {}).get("id")
+            if idd and idd.get("altScore") is not None:
+                fslog.append({"t": now_ms(), "sym": k, "prod": round(idd["score"], 4),
+                              "alt": round(idd["altScore"], 4), "px": bn[k]["now"],
+                              "n": idd.get("derated", 0)})
+        state["id_fastshadow"]["log"] = fslog[-1500:]
     # 4) 防御层与闸门
     DEFG = {}
     for k in bn:
