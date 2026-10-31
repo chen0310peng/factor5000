@@ -1414,7 +1414,102 @@ SC_MS_FREE_CAP_MS = 240*60000
 SC_MS_CRUISE_MS = 10*60000
 FEE_MAKER, FEE_TAKER = 0.02, 0.05   # % 单边
 
-def mshadow_place(state, sym, d, px, A, real_id):
+# ===================== 超短双底线锁盈影子（2026-11-01，用户批"挂"） =====================
+# 镜像实盘超短开仓，但独立离场：初始止损1.5A；tp1=1.25A平70%；
+# 剩余仓止损=max(入场+0.30A, 入场+0.125%费用保护线)（空头镜像）；tp2/tp3=2A/3A。
+# 所有成交腿均保守按吃单0.05%计费；另记每腿2/5bp滑点后的净盈亏，不碰实盘持仓与参数。
+SC_LOCKSHADOW_ON = True
+SC_LS_TP1_A = 1.25
+SC_LS_TP1_FRAC = 0.70
+SC_LS_LOCK_A = 0.30
+SC_LS_FEE_FLOOR = 0.00125
+SC_LS_SLIP2 = 0.02                  # %，每条成交腿2bp
+SC_LS_SLIP5 = 0.05                  # %，每条成交腿5bp
+
+def lockshadow_place(state, sym, d, px, A, real_id):
+    if not SC_LOCKSHADOW_ON or not A or A <= 0: return
+    sh = state.setdefault("sc_lockshadow", {"active": [], "done": []})
+    if any(a.get("realId") == real_id for a in sh["active"]): return
+    ts = now_ms()
+    sh["active"].append({
+        "sym": sym, "dir": d, "entry": px, "A": A, "fillTs": ts, "realId": real_id,
+        "stop": px-d*1.5*A, "stopInitial": px-d*1.5*A,
+        "tp1": px+d*SC_LS_TP1_A*A, "tp2": px+d*2*A, "tp3": px+d*3*A,
+        "size": 1.0, "realized": 0.0, "fee": FEE_TAKER,
+        "slip2": SC_LS_SLIP2, "slip5": SC_LS_SLIP5,
+        "feeLegs": [{"leg": "开仓", "size": 1.0, "feePct": FEE_TAKER}],
+        "tp1Done": False, "tp2Done": False, "lastBarTs": ts,
+        "peakMfe": 0.0, "lastImpTs": ts})
+    events_text = (f'🔮双底线锁盈影子 {sym} {"多" if d > 0 else "空"} 建仓 @ ${px:,.1f}'
+                   f'｜止盈1={SC_LS_TP1_A:.2f}A平{SC_LS_TP1_FRAC*100:.0f}%'
+                   f'｜锁盈=max({SC_LS_LOCK_A:.2f}A,{SC_LS_FEE_FLOOR*100:.3f}%)｜实盘#{real_id}')
+    return events_text
+
+def _lockshadow_fill(a, px, frac, leg):
+    d = a["dir"]
+    a["realized"] += frac*((px/a["entry"]-1)*d*100)
+    a["fee"] += frac*FEE_TAKER
+    a["slip2"] += frac*SC_LS_SLIP2
+    a["slip5"] += frac*SC_LS_SLIP5
+    a["feeLegs"].append({"leg": leg, "size": round(frac, 6), "feePct": round(frac*FEE_TAKER, 6)})
+    a["size"] -= frac
+
+def _lockshadow_finish(sh, a, exit_px, reason, ts, events):
+    _lockshadow_fill(a, exit_px, a["size"], reason)
+    net = a["realized"]-a["fee"]
+    d = a["dir"]
+    rec = {"sym": a["sym"], "dir": d,
+           "entry": a["entry"], "exit": exit_px, "realId": a.get("realId"),
+           "reason": reason, "gross": round(a["realized"], 6), "fee": round(a["fee"], 6),
+           "net": round(net, 6), "netSlip2": round(net-a["slip2"], 6),
+           "netSlip5": round(net-a["slip5"], 6), "feeLegs": a["feeLegs"],
+           "postTp1Stop": bool(a["tp1Done"] and reason == "止损"),
+           "tp1Done": a["tp1Done"], "tp2Done": a["tp2Done"],
+           "fillTs": a["fillTs"], "exitTs": ts, "mode": "SC_LOCK_1.25A"}
+    sh["done"].append(rec); sh["done"] = sh["done"][-600:]
+    events.append(f'🔮双底线锁盈影子 {a["sym"]} {"多" if d > 0 else "空"} {reason} @ ${exit_px:,.1f}'
+                  f'｜毛{a["realized"]:+.3f}% 费-{a["fee"]:.3f}% 净{net:+.3f}%'
+                  f'｜滑点2bp后{rec["netSlip2"]:+.3f}%｜实盘#{a.get("realId")}')
+    sh["active"].remove(a)
+
+def lockshadow_update(sym, k5, state, events):
+    if not SC_LOCKSHADOW_ON: return
+    sh = state.setdefault("sc_lockshadow", {"active": [], "done": []})
+    for a in list(sh["active"]):
+        if a["sym"] != sym: continue
+        d = a["dir"]
+        for b in k5:
+            if b["t"] <= a["lastBarTs"]: continue
+            a["lastBarTs"] = b["t"]
+            if a["tp1Done"]:
+                lk = a["entry"]+d*max(SC_LS_LOCK_A*a["A"], SC_LS_FEE_FLOOR*a["entry"])
+                a["stop"] = max(a["stop"], lk) if d > 0 else min(a["stop"], lk)
+            hit_sl = (b["l"] <= a["stop"]) if d > 0 else (b["h"] >= a["stop"])
+            hit_tp3 = (b["h"] >= a["tp3"]) if d > 0 else (b["l"] <= a["tp3"])
+            if hit_sl:  # 开盘已越价则按开盘价，禁止虚构为止损价成交
+                xp = b["o"] if ((d > 0 and b["o"] < a["stop"]) or (d < 0 and b["o"] > a["stop"])) else a["stop"]
+                _lockshadow_finish(sh, a, xp, "止损", b["t"], events); break
+            if hit_tp3:
+                _lockshadow_finish(sh, a, a["tp3"], "止盈3", b["t"], events); break
+            mfe = (b["c"]/a["entry"]-1)*d
+            if mfe > a["peakMfe"]+SC_STALL_STEP*a["A"]/a["entry"]:
+                a["peakMfe"] = mfe; a["lastImpTs"] = b["t"]
+            if b["t"]-a["fillTs"] >= SC_HOLD_MIN*60000:
+                _lockshadow_finish(sh, a, b["c"], f"限时{SC_HOLD_MIN}m", b["t"], events); break
+            if mfe > SC_FEE_RT and b["t"]-a["lastImpTs"] > SC_STALL_MIN*60000:
+                _lockshadow_finish(sh, a, b["c"], "巡航停滞", b["t"], events); break
+            for key, tp in (("tp1Done", a["tp1"]), ("tp2Done", a["tp2"])):
+                if not a[key] and ((b["h"] >= tp) if d > 0 else (b["l"] <= tp)):
+                    frac = a["size"]*(SC_LS_TP1_FRAC if key == "tp1Done" else 0.5)
+                    _lockshadow_fill(a, tp, frac, "止盈1" if key == "tp1Done" else "止盈2")
+                    a[key] = True
+                    if key == "tp1Done":
+                        lk = a["entry"]+d*max(SC_LS_LOCK_A*a["A"], SC_LS_FEE_FLOOR*a["entry"])
+                        a["stop"] = max(a["stop"], lk) if d > 0 else min(a["stop"], lk)
+
+def mshadow_place(state, sym, d, px, A, real_id, events=None):
+    note = lockshadow_place(state, sym, d, px, A, real_id)
+    if note and events is not None: events.append(note)
     if not SC_MAKER_SHADOW: return
     sh = state.setdefault("sc_mshadow", {"pending": [], "active": [], "done": []})
     if len(sh["pending"]) >= 20: return
@@ -1790,7 +1885,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                     events.append(f'🔁超短线·反向开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                   f'｜逆势信号被拦+强趋势{ss["tStr"]:+.1f}×ATR｜半仓｜限时{SC_HOLD_MIN}分钟'
                                   + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
-                    mshadow_place(state, sym, td, P, A, trades[-1]["id"])
+                    mshadow_place(state, sym, td, P, A, trades[-1]["id"], events)
                 else:
                     events.append(f'🕐 {sym} 反向开单价位已延伸 {cg2["ext"]:.1f}×ATR5 → 不追单，'
                                   f'{"回落至" if td > 0 else "反弹至"} ${cg2["waitLv"]:,.1f} 再评估')
@@ -1819,7 +1914,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                         events.append(f'🔁超短线·顺势补位开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                       f'｜逆势信号被拦+中趋势{ss["tStr"]:+.1f}×ATR｜¼仓试单｜限时{SC_HOLD_MIN}分钟'
                                       + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
-                        mshadow_place(state, sym, td, P, A, trades[-1]["id"])
+                        mshadow_place(state, sym, td, P, A, trades[-1]["id"], events)
                     else:
                         events.append(f'🕐 {sym} 顺势补位价位已延伸 {cg3["ext"]:.1f}×ATR5 → 不追单，'
                                       f'{"回落至" if td > 0 else "反弹至"} ${cg3["waitLv"]:,.1f} 再评估')
@@ -1870,7 +1965,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                               f'｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时{SC_HOLD_MIN}分钟'
                               + ct_note
                               + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
-                mshadow_place(state, sym, dir0, P, A, trades[-1]["id"])
+                mshadow_place(state, sym, dir0, P, A, trades[-1]["id"], events)
         # —— 顺势回调通道（2026-09-22）：4h单边市里只拦逆势单却从不顺势开 → 全天零开单的根因。
         #    规则：趋势方向上，5m回踩日内VWAP/EMA20（短线超卖/超买）且最新K线企稳时开第一手 ——
         if (pos.get(sym) is None and SC_PULLBACK_ON and ss.get("trending")
@@ -1910,6 +2005,7 @@ def trade_engine_scalp(sym, ss, state, gate, sc_gate, defg, events):
                     events.append(f'🌊超短线·顺势回调开{"多" if td > 0 else "空"} {sym} 第一手{f_size:.1f}% @ ${P:,.1f}'
                                   f'｜{note}｜补仓位 ${cur["add"]:,.1f} 再补{a_size:.1f}%｜限时{SC_HOLD_MIN}分钟'
                                   + ('｜🛡高波动态减半' if gate["sizeMult"] < 1 else ''))
+                    mshadow_place(state, sym, td, P, A, trades[-1]["id"], events)
         return pos.get(sym)
 
     d = cur["dir"]
@@ -2086,6 +2182,7 @@ def run(state_path=STATE_PATH, select_path=SELECT_PATH):
             ssig = compute_scalp(bn[k], dyn_sc)
             trade_engine_scalp(k, ssig, state, gate, sc_gate, DEFG.get(k), events)
             mshadow_update(k, bn[k].get("k5", []), state, events)
+            lockshadow_update(k, bn[k].get("k5", []), state, events)   # 双底线锁盈影子（2026-11-01）
             pbshadow_update(k, bn[k].get("k5", []), state, events)   # 回调影子持仓推进（2026-10-12）
             print(f"{k} 超短线: sig={ssig['ssig']:+.2f} 持仓={'有' if state['positions_scalp'].get(k) else '无'}"
                   f" 闸门={'关' if sc_gate['blocked'] else '开'}", flush=True)
