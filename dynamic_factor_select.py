@@ -475,6 +475,8 @@ def main():
         if cat in ("波段","日内","超短线") and r["sharpe"] is not None and r["sharpe"] <= 0:
             w *= 0.2                      # 样本外模拟亏损的，权重降为1/5
         r["w"] = round(w, 5)
+        if not np.isfinite(r["w"]) or r["w"] <= 0:
+            continue                     # NaN/非法权重不得入池，防止合成信号与闸门序列被污染
         results.append(r)
     print(f"\n通过有效性门槛: {len(results)} "
           f"(high={sum(1 for r in results if r['conf']=='high')}, "
@@ -516,6 +518,8 @@ def main():
         if r["sharpe"] is not None and r["sharpe"] <= 0:
             w *= 0.2
         r["w"] = round(w, 5)
+        if not np.isfinite(r["w"]) or r["w"] <= 0:
+            continue                     # NaN/非法权重不得入池，防止合成信号与闸门序列被污染
         sc_results.append(r)
     print(f"超短线动态池: {len(sc_results)}", flush=True)
     results.extend(sc_results)
