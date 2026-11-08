@@ -370,6 +370,14 @@ def _recent_ic(arr, c, ts, dirn, days=3, fw=4):
     if x.std() < 1e-12 or y.std() < 1e-12: return None
     return float(np.corrcoef(x, y)[0, 1])
 
+def valid_factor_weight(f):
+    """非法/非有限权重或方向不得参与合成；NaN绝不能经clamp变成-3强空信号。"""
+    try:
+        w, d = float(f.get("w")), float(f.get("dir"))
+        return (w, d) if np.isfinite(w) and np.isfinite(d) and w > 0 and d != 0 else None
+    except (TypeError, ValueError):
+        return None
+
 def dyn_compute_all(bn, dyn500):
     """移植 dynComputeAll：返回 {sym: {sw,id,os,sc:{score,live,total,top}, swSeries,idSeries, ns}}"""
     out = {}
@@ -418,6 +426,9 @@ def dyn_compute_all(bn, dyn500):
             ssum2 = wsum2 = 0.0; derated = 0          # 快速降权影子累加器（仅日内）
             acc = wacc = None
             for f in pool:
+                fw = valid_factor_weight(f)
+                if fw is None: continue
+                fw, fd = fw
                 env = envs.get(tf_key(f.get("tf", "")))
                 if env is None or len(env["c"]) < 60: continue
                 try:
@@ -432,14 +443,14 @@ def dyn_compute_all(bn, dyn500):
                     if not np.isfinite(z): continue
                 except Exception:
                     continue
-                contrib = f["dir"]*z*f["w"]
-                ssum += contrib; wsum += f["w"]; live += 1
+                contrib = fd*z*fw
+                ssum += contrib; wsum += fw; live += 1
                 if ID_FASTSHADOW_ON and cat == "日内":   # 影子：近3日IC反号 → 当日权重减半
-                    w2 = f["w"]
-                    ic = _recent_ic(arr, env["c"], env["t"], f["dir"])
+                    w2 = fw
+                    ic = _recent_ic(arr, env["c"], env["t"], fd)
                     if ic is not None and ic < 0:
-                        w2 = f["w"]*0.5; derated += 1
-                    ssum2 += f["dir"]*z*w2; wsum2 += w2
+                        w2 = fw*0.5; derated += 1
+                    ssum2 += fd*z*w2; wsum2 += w2
                 top.append({"id": f["id"], "name": f["name"], "contrib": contrib, "z": z})
                 if grid is not None:
                     try:
@@ -447,7 +458,7 @@ def dyn_compute_all(bn, dyn500):
                         if acc is None:
                             acc = np.zeros(len(grid["t"])); wacc = np.zeros(len(grid["t"]))
                         msk = np.isfinite(al)
-                        acc[msk] += f["dir"]*al[msk]*f["w"]; wacc[msk] += f["w"]
+                        acc[msk] += fd*al[msk]*fw; wacc[msk] += fw
                     except Exception:
                         pass
             top.sort(key=lambda x: -abs(x["contrib"]))
