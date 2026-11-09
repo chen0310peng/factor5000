@@ -1,94 +1,86 @@
 {
- "generated_at": "2026-11-02 06:53",
+ "generated_at": "2026-11-09 07:15",
  "params_locked": {
   "W": 7,
   "ge": 0.9
  },
- "baseline_60d": 0.0,
- "current_params_60d": 0.0,
+ "baseline_60d": -2.62,
+ "current_params_60d": -0.94,
  "grid": [
   {
    "W": 3,
    "ge": 0.7,
-   "total": 0.0,
-   "improved": false
+   "total": -1.05,
+   "improved": true
   },
   {
    "W": 3,
    "ge": 0.9,
-   "total": 0.0,
-   "improved": false
+   "total": -1.04,
+   "improved": true
   },
   {
    "W": 3,
    "ge": 1.1,
-   "total": 0.0,
-   "improved": false
+   "total": -1.2,
+   "improved": true
   },
   {
    "W": 5,
    "ge": 0.7,
-   "total": 0.0,
-   "improved": false
+   "total": -0.16,
+   "improved": true
   },
   {
    "W": 5,
    "ge": 0.9,
-   "total": 0.0,
-   "improved": false
+   "total": -0.33,
+   "improved": true
   },
   {
    "W": 5,
    "ge": 1.1,
-   "total": 0.0,
-   "improved": false
+   "total": -0.23,
+   "improved": true
   },
   {
    "W": 7,
    "ge": 0.7,
-   "total": 0.0,
-   "improved": false
+   "total": -0.93,
+   "improved": true
   },
   {
    "W": 7,
    "ge": 0.9,
-   "total": 0.0,
-   "improved": false
+   "total": -0.94,
+   "improved": true
   },
   {
    "W": 7,
    "ge": 1.1,
-   "total": 0.0,
-   "improved": false
+   "total": -0.84,
+   "improved": true
   },
   {
    "W": 10,
    "ge": 0.7,
-   "total": 0.0,
-   "improved": false
+   "total": -1.09,
+   "improved": true
   },
   {
    "W": 10,
    "ge": 0.9,
-   "total": 0.0,
-   "improved": false
+   "total": -0.96,
+   "improved": true
   },
   {
    "W": 10,
    "ge": 1.1,
-   "total": 0.0,
-   "improved": false
+   "total": -1.0,
+   "improved": true
   }
  ],
  "history": [
-  {
-   "week": "2026-08-23",
-   "pool": "2026-08-23 03:35",
-   "baseline": -1.24,
-   "current_params": 0.48,
-   "current_improved": true,
-   "grid_improved": 12
-  },
   {
    "week": "2026-08-24",
    "pool": "2026-08-24 03:41",
@@ -176,8 +168,16 @@
    "current_params": 0.0,
    "current_improved": false,
    "grid_improved": 0
+  },
+  {
+   "week": "2026-11-09",
+   "pool": "2026-11-09 06:52",
+   "baseline": -2.62,
+   "current_params": -0.94,
+   "current_improved": true,
+   "grid_improved": 12
   }
  ],
- "review_needed": true,
+ "review_needed": false,
  "note": "只监控不自动改参数；连续3周未改善才标记review_needed，由人工复核"
 }
