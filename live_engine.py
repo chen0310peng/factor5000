@@ -1426,12 +1426,13 @@ SC_MS_CRUISE_MS = 10*60000
 FEE_MAKER, FEE_TAKER = 0.02, 0.05   # % 单边
 
 # ===================== 超短双底线锁盈影子（2026-11-01，用户批"挂"） =====================
-# 镜像实盘超短开仓，但独立离场：初始止损1.5A；tp1=1.25A平70%；
-# 剩余仓止损=max(入场+0.30A, 入场+0.125%费用保护线)（空头镜像）；tp2/tp3=2A/3A。
+# 旧版58笔扣费-6.828%，51笔严格配对跑输现行0.674%，不转正。
+# 2026-11-14 微调成单变量对照：初始止损、1A/2A/3A止盈、止盈1平50%、限时和巡航均与现行一致；
+# 唯一差异是止盈1后，剩余仓止损=max(入场+0.30A, 入场+0.125%费用保护线)（空头镜像），现行只锁0.1%。
 # 所有成交腿均保守按吃单0.05%计费；另记每腿2/5bp滑点后的净盈亏，不碰实盘持仓与参数。
 SC_LOCKSHADOW_ON = True
-SC_LS_TP1_A = 1.25
-SC_LS_TP1_FRAC = 0.70
+SC_LS_TP1_A = 1.0
+SC_LS_TP1_FRAC = 0.50
 SC_LS_LOCK_A = 0.30
 SC_LS_FEE_FLOOR = 0.00125
 SC_LS_SLIP2 = 0.02                  # %，每条成交腿2bp
@@ -1476,7 +1477,7 @@ def _lockshadow_finish(sh, a, exit_px, reason, ts, events):
            "netSlip5": round(net-a["slip5"], 6), "feeLegs": a["feeLegs"],
            "postTp1Stop": bool(a["tp1Done"] and reason == "止损"),
            "tp1Done": a["tp1Done"], "tp2Done": a["tp2Done"],
-           "fillTs": a["fillTs"], "exitTs": ts, "mode": "SC_LOCK_1.25A"}
+           "fillTs": a["fillTs"], "exitTs": ts, "mode": "SC_LOCK_ONLY_0.30A"}
     sh["done"].append(rec); sh["done"] = sh["done"][-600:]
     events.append(f'🔮双底线锁盈影子 {a["sym"]} {"多" if d > 0 else "空"} {reason} @ ${exit_px:,.1f}'
                   f'｜毛{a["realized"]:+.3f}% 费-{a["fee"]:.3f}% 净{net:+.3f}%'
