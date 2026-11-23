@@ -1,94 +1,86 @@
 {
- "generated_at": "2026-11-16 07:20",
+ "generated_at": "2026-11-23 08:17",
  "params_locked": {
   "W": 7,
   "ge": 0.9
  },
- "baseline_60d": -3.06,
- "current_params_60d": -1.6,
+ "baseline_60d": -2.19,
+ "current_params_60d": -0.72,
  "grid": [
   {
    "W": 3,
    "ge": 0.7,
-   "total": -1.65,
+   "total": -1.98,
    "improved": true
   },
   {
    "W": 3,
    "ge": 0.9,
-   "total": -1.97,
-   "improved": true
+   "total": -2.19,
+   "improved": false
   },
   {
    "W": 3,
    "ge": 1.1,
-   "total": -1.66,
-   "improved": true
+   "total": -2.84,
+   "improved": false
   },
   {
    "W": 5,
    "ge": 0.7,
-   "total": -1.11,
+   "total": -1.49,
    "improved": true
   },
   {
    "W": 5,
    "ge": 0.9,
-   "total": -1.15,
+   "total": -0.72,
    "improved": true
   },
   {
    "W": 5,
    "ge": 1.1,
-   "total": -1.06,
+   "total": -1.2,
    "improved": true
   },
   {
    "W": 7,
+   "ge": 0.7,
+   "total": -1.7,
+   "improved": true
+  },
+  {
+   "W": 7,
+   "ge": 0.9,
+   "total": -0.72,
+   "improved": true
+  },
+  {
+   "W": 7,
+   "ge": 1.1,
+   "total": -0.94,
+   "improved": true
+  },
+  {
+   "W": 10,
    "ge": 0.7,
    "total": -1.4,
    "improved": true
   },
   {
-   "W": 7,
-   "ge": 0.9,
-   "total": -1.6,
-   "improved": true
-  },
-  {
-   "W": 7,
-   "ge": 1.1,
-   "total": -1.57,
-   "improved": true
-  },
-  {
-   "W": 10,
-   "ge": 0.7,
-   "total": -2.88,
-   "improved": true
-  },
-  {
    "W": 10,
    "ge": 0.9,
-   "total": -2.53,
+   "total": -1.1,
    "improved": true
   },
   {
    "W": 10,
    "ge": 1.1,
-   "total": -2.94,
+   "total": -1.14,
    "improved": true
   }
  ],
  "history": [
-  {
-   "week": "2026-08-31",
-   "pool": "2026-08-31 00:28",
-   "baseline": -1.91,
-   "current_params": -1.03,
-   "current_improved": true,
-   "grid_improved": 12
-  },
   {
    "week": "2026-09-07",
    "pool": "2026-09-07 00:45",
@@ -176,6 +168,14 @@
    "current_params": -1.6,
    "current_improved": true,
    "grid_improved": 12
+  },
+  {
+   "week": "2026-11-23",
+   "pool": "2026-11-23 07:55",
+   "baseline": -2.19,
+   "current_params": -0.72,
+   "current_improved": true,
+   "grid_improved": 10
   }
  ],
  "review_needed": false,
